@@ -1,8 +1,34 @@
 // ==========================================================================
-// SmartMark Pro 刑案電子卷證：智慧書籤建立器 
-// (V10.4 - 供述姓名精準修正版)
-// 修復：通用浮水印清除、供述姓名欄位尾碼清理、遠距/通譯頁姓名誤抓防禦
-// This script was designed by Prosecutor Chen Le-Wei and optimized by AI.
+// SmartMark Pro 刑案電子卷證：書籤草稿自動建立腳本
+// 版本：V11.0.0（正式版）
+// 功能：掃描刑案電子卷證 PDF，自動建立「供述證據／非供述證據」書籤，並擷取
+//       供述筆錄中命中關鍵字的問答原文摘要，以可複製對話框呈現。
+//
+// 一、辨識能力
+//   · 供述：警詢／調查／廉詢筆錄、偵訊筆錄（檢察官）、詢問筆錄（檢察事務官）、
+//          準備程序筆錄、審判筆錄、交通事故談話紀錄表等。
+//   · 非供述：金融交易明細、相片影像查詢、診斷證明、鑑定書、各式交通事故表單、
+//          刑事告訴狀、答辯狀、刑事委任狀…等。
+//   · 姓名：中文姓名；外國人英文姓名（自動還原空白，如 Chen Mo Mo）。
+//   · 日期：鎖定民國 100～129 年，優先取筆錄日期欄位，避開出生年月日。
+//
+// 二、效能設計（已達 Acrobat 沙盒實務最佳）
+//   · 逐字快取 getWord：抽樣粗篩取過的字於全文抽取時重用，省下重複取詞呼叫。
+//   · 頭/中/尾抽樣粗篩：無關頁面不做全文抽取。
+//   · 報表整段一次輸出 / 移入對話框：避免逐行 console.println 拖慢收尾。
+//
+// 三、呈現
+//   · 書籤清單＋問答摘要＋結構摘要/存檔狀態，以 app.execDialog 自訂對話框呈現，
+//     可整份全選複製（Ctrl+A→Ctrl+C）；execDialog 失敗自動退回主控台；全程不
+//     修改卷證 PDF（僅彈窗）。
+//   · 供述摘要：同頁問答合併於同一編號；不同「當事人」之間以粗線分隔；
+//     欄位以「 | 」分隔。
+//   · 進度條：每 5% 或每 20 頁（取較密者）更新並保證 100%，避免誤以為當機。
+//
+// 注意：本版使用 app.execDialog / app.execMenuItem 等高權限功能，請從 Acrobat
+//       JavaScript 主控台（Ctrl+J）執行。
+// This script was designed by Prosecutor Chen Le-Wei, Taichung District Prosecutors Office, and optimized by AI.
+// This is an independent personal creation. It does not represent, and is not endorsed by, any organization or institution.
 // ==========================================================================
 
 (function() {
@@ -15,18 +41,21 @@
     var totalPages = doc.numPages;
     var statementList = [];
     var docList = [];
+    var idNameMap = {};
 
     console.clear();
-    console.println("🚀 SmartMark Pro V10.4 (供述姓名精準修正版) 啟動中...");
+    console.println("🚀 SmartMark Pro V11.0.0 啟動中...");
     console.println("📄 總頁數：" + totalPages + " 頁");
     console.println("⏳ 系統已鎖定民國100～129年之3位數日期，並優先以筆錄日期欄位判斷...");
     console.println("─────────────────────────────────");
 
     // ── 核心資安防禦：定義污染源浮水印字串 ──
+    // 注意：不同卷宗的浮水印碼不同（實測兩份測試卷的浮水印字串即互異），
+    // 此固定字串僅作為已知樣本保留，真正清洗工作交由下方「通用型樣」regex。
     var targetWatermark = "=*M*T*E*1*M*D*U*y*N*j*E*x*M*z*Y*z*M*G*N*s*c*m*4*x*N*z*I*u*M*z*A*u*M*S*4*y*M*j*I*=@";
 
     // ── 預編譯 RegExp (全部優化為字面量宣告，確保在沙盒中無語法轉義坑) ──
-    var reRough = /筆錄|調查|偵訊|警詢|詢問|審判|準備程序|出席職員|偵查庭|檢察官問|搜索|扣押|鑑定|採尿|攝影時間|相片影像|解剖|醫鑑字|送驗資料|刑事警察局|廉政署|肅貪組|調查局|調查處|機動工作站|存款交易明細|往來交易明細|診斷證明書|扣押物品照片|酒精測定|交通事故|肇事人自首|醫院|照片黏貼紀錄表|初步分析研判表|現場圖|談話紀錄表|當時天候|有無飲酒|鑑定意見書|駕籍詳細|車輛詳細|職務報告|身分證統一編號|支出金額|存入金額|帳號|交易時間|交易序號|165專線|詐騙帳戶|被害人受騙款項|刑事辯護意旨|刑事答辯狀|辯護意旨狀|答辯狀|刑事告訴狀|承辦股別|相驗屍體證明書|成人保護案件通報表|歸檔案號|刑案現場勘察報告|勘察目的|勘察人員|國民身分證|受詢/;
+    var reRough = /筆錄|調查|偵訊|警詢|詢問|審判|準備程序|出席職員|偵查庭|檢察官問|搜索|扣押|鑑定|採尿|攝影時間|相片影像|解剖|醫鑑字|送驗資料|刑事警察局|廉政署|肅貪組|調查局|調查處|機動工作站|存款交易明細|往來交易明細|診斷證明書|扣押物品照片|酒精測定|交通事故|肇事人自首|醫院|照片黏貼紀錄表|初步分析研判表|現場圖|談話紀錄表|當時天候|有無飲酒|鑑定意見書|駕籍詳細|車輛詳細|職務報告|身分證統一編號|支出金額|存入金額|帳號|交易時間|交易序號|165專線|詐騙帳戶|被害人受騙款項|刑事辯護意旨|刑事答辯狀|辯護意旨狀|答辯狀|刑事告訴狀|刑事委任狀|承辦股別|相驗屍體證明書|成人保護案件通報表|歸檔案號|刑案現場勘察報告|勘察目的|勘察人員|國民身分證|受詢/;
     
     // 🚀 關鍵升級：鎖定民國3位數日期。
     // V10.2 註解寫 100～119 年，但實際只吃 113～117 年；本版放寬為 100～129 年，
@@ -38,13 +67,14 @@
     var reDateSlashg = /(1[0-2]\d)\/(\d{1,2})\/(\d{1,2})/g;
     var reDateDotg   = /(1[0-2]\d)\.(\d{1,2})\.(\d{1,2})/g;
     var reBadDateContext = /出生|生日|年籍|戶籍|身分證|國民身分證|出生年月日|出生日期|出生年|出生月|出生地/;
+    var reNicknameLabel = /綽號|绰號|绰号|缚號|缚号|縛號|縛号|缔號|缔号|暱稱|暱名|別名|外號/;
     
     // 避免把姓名中的「有、無、生、住」等字切掉；只針對完整欄位詞截斷。
-    var reTailCut    = /(性別|出生年月日|出生日期|出生|年籍|戶籍|住居所|住所|住址|身分證|國民身分證|統一編號|綽號|年齡|歲).*$/;
+    var reTailCut    = /(性別|出生年月日|出生日期|出生|年籍|戶籍|住居所|住所|住址|身分證|國民身分證|統一編號|綽號|绰號|绰号|缚號|缚号|縛號|縛号|缔號|缔号|暱稱|暱名|別名|外號|年齡|歲).*$/;
     var reChName     = /^[\u4e00-\u9fa5]{2,5}/;
     var reChName4    = /^[\u4e00-\u9fa5]{2,4}/;
-    var reNameIgnore = /不詳|沒有|忘記|同上|國民|身分|姓名|年籍|住址|下列|告知|出生|詢問|綽號|上記|資料|前科|權利|事項|正確|清楚|何關|關係|告訴/;
-    var reSkipAns    = /不詳|沒有|同上|戶籍|臺中|臺南|臺北|高雄|新竹|苗栗|正確|知道|告知|年籍|住址|下列|出生|詢問|瞭解|都沒|因為|均不|綽號|特徵|性別|清楚|上記|資料|前科|權利|事項|上述|我們|八十|開始/;
+    var reNameIgnore = /不詳|沒有|忘記|同上|國民|身分|姓名|年籍|住址|下列|告知|出生|詢問|綽號|绰號|绰号|缚號|缚号|縛號|縛号|缔號|缔号|暱稱|暱名|別名|外號|上記|資料|前科|權利|事項|正確|清楚|何關|關係|告訴/;
+    var reSkipAns    = /不詳|沒有|同上|戶籍|臺中|臺南|臺北|高雄|新竹|苗栗|正確|知道|告知|年籍|住址|下列|出生|詢問|瞭解|都沒|因為|均不|綽號|绰號|绰号|缚號|缚号|縛號|縛号|缔號|缔号|暱稱|暱名|別名|外號|特徵|性別|清楚|上記|資料|前科|權利|事項|上述|我們|八十|開始/;
     var reWitNotName = /沒有|不詳|同上|如上|知道/;
     var reChinese    = /[\u4e00-\u9fa5]/g;
     var reClean1     = /[\s　]+/g;
@@ -72,6 +102,25 @@
         return pageCache[pageNum].n;
     };
 
+    // 🚀 V11.0.0 效能核心：單頁逐字快取。
+    // getPageNthWord 是 Acrobat 沙盒中最昂貴的呼叫；抽樣粗篩會先取頁首／頁中／
+    // 頁尾數百個字，原 V11 在需要全文時又自第 0 字重新取一遍，等於白做。
+    // 此處把每個取過的字快取到 pageCache[p].words[w]，抽樣與全文共用同一份字庫，
+    // 全文抽取時只補抓抽樣未取過的字，可在大卷宗省下數萬次取詞呼叫。
+    // 字庫同時供「英文姓名還原空白」重用（見 getPageTextSpaced）。
+    var getWord = function(pageNum, w) {
+        var c = pageCache[pageNum];
+        if (c === undefined) { c = pageCache[pageNum] = {}; }
+        if (c.words === undefined) c.words = [];
+        var v = c.words[w];
+        if (v === undefined) {
+            v = doc.getPageNthWord(pageNum, w, false);
+            if (v === undefined || v === null) v = "";
+            c.words[w] = v;
+        }
+        return v;
+    };
+
     // 🚀 關鍵升級：主動防禦，自文字源頭物理抽乾浮水印雜訊。
     // RegExp 只建立一次，避免每頁重複 new RegExp；同時 escape 所有特殊字元。
     var escapeRegExp = function(s) {
@@ -89,15 +138,51 @@
         if (pageCache[pageNum] && pageCache[pageNum].text !== undefined) return pageCache[pageNum].text;
         var n = getPageWordCount(pageNum);
         var parts = [];
-        for (var w = 0; w < n; w++) parts.push(doc.getPageNthWord(pageNum, w, false));
+        for (var w = 0; w < n; w++) parts.push(getWord(pageNum, w));
         var text = parts.join("").replace(reClean1, "").replace(/◦/g, "0").replace(/(\d)[，、。．,](\d)/g, "$1$2");
-        
+
         // 執行洗圖過濾
         text = sanitizeText(text);
-        
+
         if (pageCache[pageNum] === undefined) pageCache[pageNum] = {};
         pageCache[pageNum].text = text;
         return text;
+    };
+
+    // 英文姓名還原用：與 getPageText 相同的清洗，但保留「單一空白」當作字界。
+    // 僅在偵測到外國人英文姓名（去空白後的連寫字串）時才呼叫，平時不建置。
+    var getPageTextSpaced = function(pageNum) {
+        if (pageCache[pageNum] && pageCache[pageNum].spaced !== undefined) return pageCache[pageNum].spaced;
+        var n = getPageWordCount(pageNum);
+        var parts = [];
+        for (var w = 0; w < n; w++) parts.push(getWord(pageNum, w));
+        var text = sanitizeText(parts.join(" "))
+            .replace(/[\s　]+/g, " ")
+            .replace(/◦/g, "0");
+        if (pageCache[pageNum] === undefined) pageCache[pageNum] = {};
+        pageCache[pageNum].spaced = text;
+        return text;
+    };
+
+    // 把去空白後的連寫英文姓名（如 LEEKINFAIREMUS）還原回含空白版本
+    // （LEE KIN FAI REMUS）。作法：在保留單一空白的頁面文字中，比對「去空白後」
+    // 的對應位置，再取回該段含空白原文。OCR 找不到時回傳原連寫字串，永不更糟。
+    var recoverEnglishSpacing = function(pageNum, runon) {
+        if (!runon || !/^[A-Za-z]{4,}$/.test(runon)) return runon;
+        var spaced = getPageTextSpaced(pageNum);
+        if (!spaced) return runon;
+        var stripped = "";
+        var map = [];
+        for (var i = 0; i < spaced.length; i++) {
+            var ch = spaced.charAt(i);
+            if (ch !== " ") { stripped += ch; map.push(i); }
+        }
+        var idx = stripped.indexOf(runon);
+        if (idx === -1) return runon;
+        var start = map[idx];
+        var end = map[idx + runon.length - 1];
+        var seg = spaced.substring(start, end + 1).replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+        return seg.length >= runon.length ? seg : runon;
     };
 
     var normalizeText = function(rawText) {
@@ -129,7 +214,7 @@
         for (var r = 0; r < ranges.length; r++) {
             for (var w = ranges[r][0]; w < ranges[r][1]; w++) {
                 if (!seen[w]) {
-                    parts.push(doc.getPageNthWord(pageNum, w, false));
+                    parts.push(getWord(pageNum, w));
                     seen[w] = true;
                 }
             }
@@ -156,7 +241,7 @@
     var isOcrPage = function(pageNum) {
         var n = getPageWordCount(pageNum);
         if (n < 10) return false;
-        var text = getPageText(pageNum);
+        var text = getPageTextSample(pageNum);
         if (text.length < 20) return false;
         var chMatches = text.match(reChinese);
         var chCount = chMatches ? chMatches.length : 0;
@@ -271,7 +356,7 @@
         }
 
         if (isDetention) {
-            var titleKws = ["準備程序筆錄", "審判筆錄", "訊問筆錄", "偵訊筆錄"];
+            var titleKws = ["準備程序筆錄", "審判筆錄", "詢問筆錄", "訊問筆錄", "偵訊筆錄"];
             var si = -1;
             for (var ti = 0; ti < titleKws.length; ti++) {
                 var tidx = ct.indexOf(titleKws[ti]);
@@ -290,6 +375,16 @@
         var i = name.indexOf("民國");
         if (i !== -1) name = name.substring(0, i);
         return name.replace(reTailCut, "");
+    };
+
+    var isInvalidNameCandidate = function(cand) {
+        cand = String(cand || "").replace(/[：:，,。．、\s　]+/g, "");
+        if (cand.length < 2) return true;
+        if (reNicknameLabel.test(cand)) return true;
+        if (reNameIgnore.test(cand)) return true;
+        if (/今天|自己|回答|可以|律師|扶助|瞭解|了解/.test(cand)) return true;
+        if (/^(號|称|稱|資料|年籍|性別|出生|住址|住所|身分)$/.test(cand)) return true;
+        return false;
     };
 
     var matchNMinusOne = function(ct, keywords) {
@@ -452,6 +547,13 @@
             return {type: "刑案現場勘察報告", base: "刑案現場勘察報告"};
         }
 
+        // 刑事委任狀（律師選任/委任）：標題詞明確。此頁常同時含「案號／承辦股別」
+        // 欄位，且頁尾說明出現「告訴人委任應填…」，易被下方「刑事告訴狀」規則的
+        // N-1 命中誤判，故在此提前以標題詞精準攔截。
+        if (has("刑事委任狀")) {
+            return {type: "刑事委任狀", base: "刑事委任狀"};
+        }
+
         var defDocName = detectDefenseDocName(ct);
         if (defDocName !== null && matchNMinusOne(ct, ["案號", "股別", "被告"]) && !has("偵查卷宗") && !has("分案日期")) {
             var defName = extractNameByLabel(ct, "被告");
@@ -459,7 +561,9 @@
             return {type: defTitle, base: "答辯狀類"};
         }
 
-        if (matchNMinusOne(ct, ["刑事告訴狀", "案號", "承辦股別", "告訴人"])) {
+        // 必須真的出現「刑事告訴狀」標題詞才認定；否則僅憑「案號／承辦股別／告訴人」
+        // 這類通用欄位，會把委任狀等其他書狀誤判成告訴狀。
+        if (has("刑事告訴狀") && matchNMinusOne(ct, ["刑事告訴狀", "案號", "承辦股別", "告訴人"])) {
             var compName = extractNameByLabel(ct, "告訴人");
             var compTitle = compName ? "刑事告訴狀-告訴人" + compName : "刑事告訴狀";
             return {type: compTitle, base: "刑事告訴狀"};
@@ -582,6 +686,23 @@
         return false;
     };
 
+    // V11.0.0：擷取「第N次」筆錄場次（同名同日多次筆錄的可靠區別欄位）。
+    // 嚴格要求「第」＋數字＋「次」，避免把「第N頁」誤判為場次；OCR 不清楚時
+    // 回傳 null，交由去重邏輯退回原數字編號，確保書籤命名一致。
+    var cnNumMap = {"一":"1","二":"2","三":"3","四":"4","五":"5","六":"6","七":"7","八":"8","九":"9","十":"10"};
+    var extractSessionNo = function(ct) {
+        var head = ct.substring(0, 400);
+        var m = head.match(/第\s*([0-9０-９一二三四五六七八九十]{1,3})\s*次/);
+        if (!m) return null;
+        var raw = m[1].replace(/[０-９]/g, function(d){ return String.fromCharCode(d.charCodeAt(0) - 0xFF10 + 0x30); });
+        if (/^[0-9]+$/.test(raw)) {
+            var v = parseInt(raw, 10);
+            return (v >= 1 && v <= 99) ? String(v) : null;
+        }
+        if (cnNumMap[raw]) return cnNumMap[raw];
+        return null;
+    };
+
     // ── 供述證據 辨識邏輯 ──
     var classifyPage = function(ct) {
         if ((ct.indexOf("道路交通事故談話紀錄表") !== -1 && ct.indexOf("肇事車種") !== -1) || matchNMinusOne(ct, ["詢問人", "當時天候", "駕駛執照", "有無飲酒", "保險證"])) {
@@ -603,6 +724,9 @@
         var hasProQOff = ct.indexOf("檢察事務官問姓名") !== -1;
         var hasPrepare = ct.indexOf("準備程序筆錄") !== -1;
         var hasJudge   = ct.indexOf("審判筆錄") !== -1;
+        var hasInquiryTitle = ct.indexOf("詢問筆錄") !== -1;
+        var hasProsecutorOfficer = ct.indexOf("檢察事務官") !== -1;
+        var hasProsecutorOfficerInquiry = hasProQOff && hasProsecutorOfficer && hasIdCard;
         var primaryRole = detectPrimaryRole(ct);
         
         var hasEconomy = ct.indexOf("經濟狀況") !== -1;
@@ -611,12 +735,27 @@
         var hasPolice  = ct.indexOf("詢問筆錄") !== -1 || ct.indexOf("警詢") !== -1;
         var hasSuspect = ct.indexOf("受詢") !== -1 || ct.indexOf("詢問") !== -1;
         var hasPoliceId = hasIdCard && hasSuspect;
+        var hasPoliceUnit = ct.indexOf("警察局") !== -1 || ct.indexOf("分局") !== -1 || ct.indexOf("偵查隊") !== -1;
+        var hasPoliceInquiryProfile = hasPoliceUnit && hasIdCard &&
+            (ct.indexOf("詢問時") !== -1 || ct.indexOf("詢時") !== -1 || ct.indexOf("受詢問時") !== -1) &&
+            (ct.indexOf("詢問地") !== -1 || ct.indexOf("問地") !== -1 || ct.indexOf("偵查隊") !== -1) &&
+            (ct.indexOf("案由") !== -1 || ct.indexOf("由詐欺") !== -1 || ct.indexOf("涉嫌") !== -1) &&
+            ct.indexOf("得保持") !== -1 &&
+            (ct.indexOf("姓名") !== -1 || ct.indexOf("姓 名") !== -1);
 
         var hasABInv = ct.indexOf("法務部調查局") !== -1 || ct.indexOf("調查處") !== -1 || ct.indexOf("機動工作站") !== -1;
         if (hasABInv && (hasEconomy || hasPoliceId) && hasInvRec) return {type: "調查筆錄", witness: false, detention: false};
 
         var hasACInv = ct.indexOf("廉政署") !== -1 || ct.indexOf("肅貪組") !== -1 || ct.indexOf("北部地區調查組") !== -1 || ct.indexOf("中部地區調查組") !== -1 || ct.indexOf("南部地區調查組") !== -1;
         if (hasACInv && (hasEconomy || hasPoliceId) && hasInvRec) return {type: "廉詢筆錄", witness: false, detention: false};
+
+        // 檢察事務官製作的是「詢問筆錄」，不要因出現偵查庭／出席職員而歸成檢察官偵訊筆錄。
+        if (hasInquiryTitle && hasStaff && hasProsecutorOfficer) {
+            return {type: "詢問筆錄", witness: primaryRole === "witness", detention: true};
+        }
+        if (hasProsecutorOfficerInquiry && (hasStaff || ct.indexOf("檢察事務官告知被告") !== -1 || ct.indexOf("告知被告") !== -1)) {
+            return {type: "詢問筆錄", witness: primaryRole === "witness", detention: true};
+        }
 
         // 偵訊／審判類：同頁同時出現「被告答」與「證人答」時，不再直接判為證人，
         // 而是以最早出現的主要問答角色作為該頁主體。
@@ -625,9 +764,12 @@
         if (hasPrepare && hasStaff && hasDefAns) return {type: "準備程序筆錄", witness: false, detention: true};
         if (hasJudge && ct.indexOf("準備程序") === -1 && hasStaff && hasDefAns) return {type: "審判筆錄", witness: false, detention: true};
         if (hasStaff && (hasDefAns || hasRelAns || hasCompAns) && hasIdCard) return {type: "偵訊筆錄", witness: false, detention: true};
-        if (hasStaff && (hasProQ || hasProQOff)) return {type: "偵訊筆錄", witness: false, detention: true};
-        if ((hasProQ || hasProQOff) && hasIdCard) return {type: "偵訊筆錄", witness: false, detention: true};
+        if (hasStaff && hasProQ) return {type: "偵訊筆錄", witness: false, detention: true};
+        if (hasStaff && hasProQOff) return {type: "詢問筆錄", witness: false, detention: true};
+        if (hasProQ && hasIdCard) return {type: "偵訊筆錄", witness: false, detention: true};
+        if (hasProQOff && hasIdCard) return {type: "詢問筆錄", witness: false, detention: true};
         if (hasInqRec && hasWitAns && hasIdCard && !hasDefAns) return {type: "偵訊筆錄", witness: true, detention: true};
+        if (hasPoliceInquiryProfile) return {type: "警詢筆錄", witness: false, detention: false};
         
         if ((hasEconomy || hasPoliceId) && (hasInvRec || hasPolice)) {
             return {type: "警詢筆錄", witness: false, detention: false};
@@ -658,10 +800,10 @@
         cand = trimName(cand).replace(/[：:，,。．、\s　]+$/g, "");
         rest = rest || "";
 
-        if (cand.length >= 4 && /受別$/.test(cand) && /^[（(]?綽|^號|^性別/.test(rest)) {
+        if (cand.length >= 4 && /受別$/.test(cand) && (reNicknameLabel.test(rest.substring(0, 4)) || /^號|^性別/.test(rest))) {
             cand = cand.substring(0, cand.length - 2);
         }
-        if (cand.length >= 3 && /別$/.test(cand) && /^[（(]?綽|^號|^性別/.test(rest)) {
+        if (cand.length >= 3 && /別$/.test(cand) && (reNicknameLabel.test(rest.substring(0, 4)) || /^號|^性別/.test(rest))) {
             cand = cand.substring(0, cand.length - 1);
         }
         if (cand.length >= 3 && /[男女]$/.test(cand) && /^(?:\d|[一二三四五六七八九十百零〇]+歲|歲|民國|國民|護照|籍|出生|生)/.test(rest)) {
@@ -692,7 +834,7 @@
         var nm = reChName.exec(after);
         if (nm) {
             var cand = cleanSubjectName(nm[0], after.substring(nm[0].length));
-            if (cand.length >= 2 && !reNameIgnore.test(cand)) return cand;
+            if (!isInvalidNameCandidate(cand)) return cand;
         }
         var nmEn = reEnName.exec(after);
         if (nmEn) {
@@ -702,7 +844,124 @@
         return null;
     };
 
+    var extractNameFromIdentityBlock = function(ct) {
+        var anchors = [
+            "姓名、年籍、住址、國民身分證統一編號",
+            "姓名年籍住址國民身分證統一編號",
+            "姓名、年籍、住址、身分證統一編號",
+            "國民身分證統一編號",
+            "身分證統一編號"
+        ];
+        var answerMarkers = ["被告答", "證人答", "告訴人答", "關係人答", "答"];
+
+        for (var ai = 0; ai < anchors.length; ai++) {
+            var anchor = anchors[ai];
+            var searchFrom = 0;
+            while (true) {
+                var idx = ct.indexOf(anchor, searchFrom);
+                if (idx === -1) break;
+                searchFrom = idx + anchor.length;
+
+                var before = ct.substring(Math.max(0, idx - 40), idx);
+                if (before.indexOf("承辦") !== -1 || before.indexOf("記錄") !== -1 || before.indexOf("紀錄") !== -1) continue;
+
+                var block = ct.substring(idx + anchor.length, idx + anchor.length + 220);
+                for (var mi = 0; mi < answerMarkers.length; mi++) {
+                    var marker = answerMarkers[mi];
+                    var miIdx = block.indexOf(marker);
+                    if (miIdx === -1) continue;
+                    var cand = extractCandidateNameAfter(block.substring(miIdx + marker.length));
+                    if (cand && !isInvalidNameCandidate(cand)) return cand;
+                }
+            }
+        }
+        return null;
+    };
+
+    var extractNamesFromIdentityBlock = function(ct) {
+        var anchors = [
+            "姓名、年籍、住址、國民身分證統一編號",
+            "姓名年籍住址國民身分證統一編號",
+            "姓名、年籍、住址、身分證統一編號",
+            "檢察事務官問姓名"
+        ];
+        var names = [];
+        var seen = {};
+
+        var reFieldName = /姓\s*名[:：\s　]*([\u4e00-\u9fa5]{2,5})(?=別|性別|男|女|出生|職業|國民|戶籍|現住|教育|電話|家庭|$)/g;
+        var fm;
+        while ((fm = reFieldName.exec(ct)) !== null) {
+            var fieldCand = cleanSubjectName(fm[1], ct.substring(fm.index + fm[0].length, fm.index + fm[0].length + 20));
+            if (!isInvalidNameCandidate(fieldCand) && !seen[fieldCand]) {
+                seen[fieldCand] = true;
+                names.push(fieldCand);
+            }
+        }
+        if (names.length > 0) return names;
+
+        for (var ai = 0; ai < anchors.length; ai++) {
+            var idx = ct.indexOf(anchors[ai]);
+            if (idx === -1) continue;
+
+            var block = ct.substring(idx + anchors[ai].length, idx + anchors[ai].length + 900);
+            var stopIdx = block.indexOf("檢察事務官告知");
+            if (stopIdx === -1) stopIdx = block.indexOf("告知被告");
+            if (stopIdx !== -1) block = block.substring(0, stopIdx);
+
+            var rePerson = /(?:被告答|證人答|告訴人答|關係人答)?([\u4e00-\u9fa5]{2,5})(男|女)[0-9０-９]{1,3}歲/g;
+            var m;
+            while ((m = rePerson.exec(block)) !== null) {
+                var cand = cleanSubjectName(m[1], block.substring(m.index + m[0].length));
+                if (!isInvalidNameCandidate(cand) && !seen[cand]) {
+                    seen[cand] = true;
+                    names.push(cand);
+                }
+            }
+            if (names.length > 0) break;
+        }
+
+        return names;
+    };
+
+    var rememberIdName = function(id, name) {
+        if (!id || !name) return;
+        name = trimName(name).replace(/[：:，,。．、\s　]+$/g, "");
+        if (isInvalidNameCandidate(name)) return;
+        idNameMap[id] = name;
+    };
+
+    var registerIdNameHints = function(ct) {
+        var m;
+        var reIdBeforeName = /查詢條件[:：]?([A-Z][0-9]{9}).{0,90}姓名[:：]?([\u4e00-\u9fa5]{2,5})/g;
+        while ((m = reIdBeforeName.exec(ct)) !== null) rememberIdName(m[1], m[2]);
+
+        var reNameBeforeId = /姓名[:：]?([\u4e00-\u9fa5]{2,5}).{0,60}(?:統號|身分證號碼|國民身分證統一編號|身分證統一編號)[:：.]?([A-Z][0-9]{9})/g;
+        while ((m = reNameBeforeId.exec(ct)) !== null) rememberIdName(m[2], m[1]);
+
+        var reSubjectBeforeId = /(?:受詢問人|被告|證人|告訴人|關係人)[:：]?([\u4e00-\u9fa5]{2,5}).{0,90}(?:身分證號碼|國民身分證統一編號|身分證統一編號)[:：.]?([A-Z][0-9]{9})/g;
+        while ((m = reSubjectBeforeId.exec(ct)) !== null) rememberIdName(m[2], m[1]);
+    };
+
+    var extractNameFromKnownId = function(ct) {
+        var reId = /[A-Z][0-9]{9}/g;
+        var m;
+        while ((m = reId.exec(ct)) !== null) {
+            if (idNameMap[m[0]]) return idNameMap[m[0]];
+        }
+        return null;
+    };
+
     var extractName = function(ct, isDetention) {
+        var identityNames = extractNamesFromIdentityBlock(ct);
+        if (identityNames.length > 1) return identityNames[0] + "等" + identityNames.length + "人";
+        if (identityNames.length === 1) return identityNames[0];
+
+        var identityName = extractNameFromIdentityBlock(ct);
+        if (identityName) return identityName;
+
+        var knownIdName = extractNameFromKnownId(ct);
+        if (knownIdName) return knownIdName;
+
         var namePrefixes = [
             "姓名、年籍、住址、國民身分證統一編號被告答",
             "姓名、年籍、住址、國民身分證統一編號被告",
@@ -745,14 +1004,17 @@
                 var nm2 = reChName.exec(a2);
                 if (nm2) {
                     var c2 = trimName(nm2[0]);
-                    if (c2.length >= 2 && !reNameIgnore.test(c2)) return c2;
+                    if (!isInvalidNameCandidate(c2)) return c2;
                 }
             }
             var ai = ct.indexOf("答"), cnt = 0;
             while (ai !== -1 && cnt < 10) {
-                var aa = ct.substring(ai + 1);
-                var c3 = extractCandidateNameAfter(aa);
-                if (c3 && !reSkipAns.test(c3)) return c3;
+                var ansContext = ct.substring(Math.max(0, ai - 80), ai);
+                if (/姓名|年籍|住址|住所|身分證|身份證|統一編號|被告|證人|告訴人|關係人|受詢問人|受訊問人/.test(ansContext)) {
+                    var aa = ct.substring(ai + 1);
+                    var c3 = extractCandidateNameAfter(aa);
+                    if (c3 && !reSkipAns.test(c3) && !isInvalidNameCandidate(c3)) return c3;
+                }
                 ai = ct.indexOf("答", ai + 1);
                 cnt++;
             }
@@ -762,7 +1024,7 @@
 
     var parseStatementKey = function(title) {
         var typeOrder = 5;
-        if (title.indexOf("警詢筆錄") !== -1 || title.indexOf("調查筆錄") !== -1 || title.indexOf("廉詢筆錄") !== -1) typeOrder = 1;
+        if (title.indexOf("警詢筆錄") !== -1 || title.indexOf("調查筆錄") !== -1 || title.indexOf("廉詢筆錄") !== -1 || title.indexOf("詢問筆錄") !== -1) typeOrder = 1;
         else if (title.indexOf("偵訊筆錄") !== -1) typeOrder = 2;
         else if (title.indexOf("準備程序") !== -1) typeOrder = 3;
         else if (title.indexOf("審判筆錄") !== -1) typeOrder = 4;
@@ -921,10 +1183,24 @@
             }
         }
 
-        // 第二輪：同標題但續頁文字不同者，保留並自動編號。
+        // 第二輪：同標題但續頁文字不同者，保留並編號。
+        // V11.0.0：若該組保留下來的每一筆都有「第N次」場次且彼此不重複，
+        // 則以「(第N次)」作為後綴，較數字流水號更具司法意義；否則退回數字編號，
+        // 確保同一組書籤的後綴形式一致、不混用。
         for (var oi = 0; oi < titleOrder.length; oi++) {
             var t = titleOrder[oi];
-            if (titleInfo[t].items.length > 1) dupNames.push(t);
+            var info = titleInfo[t];
+            if (info.items.length > 1) {
+                dupNames.push(t);
+                var useSession = true;
+                var seenSess = {};
+                for (var ii = 0; ii < info.items.length; ii++) {
+                    var s = info.items[ii].session;
+                    if (!s || seenSess[s]) { useSession = false; break; }
+                    seenSess[s] = true;
+                }
+                info.useSession = useSession;
+            }
         }
 
         var result = [];
@@ -935,10 +1211,14 @@
 
             var originalTitle = it.title;
             if (titleInfo[originalTitle].items.length > 1) {
-                if (nameIdx[originalTitle] === undefined) nameIdx[originalTitle] = 1;
-                it.title = originalTitle + nameIdx[originalTitle];
+                if (titleInfo[originalTitle].useSession) {
+                    it.title = originalTitle + "(第" + it.session + "次)";
+                } else {
+                    if (nameIdx[originalTitle] === undefined) nameIdx[originalTitle] = 1;
+                    it.title = originalTitle + nameIdx[originalTitle];
+                    nameIdx[originalTitle]++;
+                }
                 it.isDup = true;
-                nameIdx[originalTitle]++;
             }
 
             delete it._keep;
@@ -948,37 +1228,514 @@
         return {list: result, dupNames: dupNames, suppressedCount: suppressedCount};
     };
 
-    // ── 主執行迴圈 ──
-    if (doScan) {
-        // 大卷宗動態降低 console 輸出頻率，避免進度列本身拖慢沙盒。
-        var logEvery = totalPages <= 100 ? 2 : Math.max(10, Math.floor(totalPages / 100)); 
+    // ── V11.0.0：供述重點原文摘錄 ──
+    var statementExcerptKeywords = [
+        "否認", "認罪",
+        "指示", "交代", "安排", "上手", "來源",
+        "LINE", "聯絡", "連絡", "取款", "收款", "面交", "轉帳", "轉賬", "匯款",
+        "詐騙",
+        "時間", "金額", "帳號", "賬號"
+    ];
 
-        for (var p = 0; p < totalPages; p++) {
-            // 🚀 核心升級：圖形進度條同步渲染
-            if (p === 0 || p % logEvery === 0 || p === totalPages - 1) {
-                var pct = Math.floor((p + 1) / totalPages * 100);
-                var barLength = 20;
-                var filledLength = Math.floor(barLength * (pct / 100));
-                var bar = "";
-                for (var b = 0; b < filledLength; b++) bar += "█";
-                for (var s = filledLength; s < barLength; s++) bar += "░";
-                console.println("⏳ 掃描進度：[" + bar + "] " + pct + "% (" + (p + 1) + "/" + totalPages + " 頁)");
+    var normalizeExcerptBody = function(text) {
+        if (!text) return "";
+        return text
+            .replace(/[\r\n\t]+/g, "")
+            .replace(/[ 　]+/g, "")
+            .replace(/間[:：]/g, "問：")
+            .replace(/問;/g, "問：")
+            .replace(/答;/g, "答：");
+    };
+
+    var hasQaMarker = function(text) {
+        return /問[:：]?/.test(text) && /答[:：]?/.test(text);
+    };
+
+    var hasNegationBefore = function(text, idx) {
+        if (idx <= 0) return false;
+        var prev1 = text.charAt(idx - 1);
+        var prev2 = idx >= 2 ? text.substring(idx - 2, idx) : "";
+        if (prev1 === "不" || prev1 === "未" || prev1 === "無" || prev1 === "沒") return true;
+        if (prev2 === "沒有" || prev2 === "並不" || prev2 === "尚未") return true;
+        return false;
+    };
+
+    var hasKeywordWithNegation = function(text, keyword) {
+        var from = 0;
+        while (true) {
+            var idx = text.indexOf(keyword, from);
+            if (idx === -1) return false;
+            if (hasNegationBefore(text, idx)) return true;
+            from = idx + keyword.length;
+        }
+    };
+
+    var hasKeywordWithoutNegation = function(text, keyword) {
+        var from = 0;
+        while (true) {
+            var idx = text.indexOf(keyword, from);
+            if (idx === -1) return false;
+            if (!hasNegationBefore(text, idx)) return true;
+            from = idx + keyword.length;
+        }
+    };
+
+    var statementExcerptKeywordRules = [
+        {label: "不承認", keyword: "承認", negated: true},
+        {label: "不知道", keyword: "知道", negated: true},
+        {label: "承認", keyword: "承認", negated: false},
+        {label: "知道", keyword: "知道", negated: false}
+    ];
+
+    var getExcerptKeyword = function(text) {
+        for (var r = 0; r < statementExcerptKeywordRules.length; r++) {
+            var rule = statementExcerptKeywordRules[r];
+            var matched = rule.negated ?
+                hasKeywordWithNegation(text, rule.keyword) :
+                hasKeywordWithoutNegation(text, rule.keyword);
+            if (matched) return rule.label;
+        }
+
+        for (var i = 0; i < statementExcerptKeywords.length; i++) {
+            if (text.indexOf(statementExcerptKeywords[i]) !== -1) return statementExcerptKeywords[i];
+        }
+        return null;
+    };
+
+    var stripOcrNoise = function(text) {
+        if (!text) return "";
+        return text
+            .replace(/給[；;:：,.，、\sA-Za-z0-9〇○零_\-)）】]{6,80}$/g, "給")
+            .replace(/看[fF][A-Za-z0-9.\-_*"']{2,30}$/g, "看")
+            .replace(/[A-Za-z]*cod\[[^\]\n\r]{8,80}\]/gi, "")
+            .replace(/[；;]?[A-Za-z]{2,}\)?[A-Za-z0-9〇○零_\-]{6,}[\u4e00-\u9fa5]{0,3}\d*/g, "")
+            .replace(/[\[【（(][；;:：,.，、\sA-Za-z0-9〇○零一二三四五六七八九十_\-]{8,80}[\]】）)]/g, "")
+            .replace(/\[[^\]\n\r]*(?:偵|警|他|少連偵|年度)[^\]\n\r]{4,80}\]/g, "")
+            .replace(/[A-Za-z]{2,}[0-9A-Za-z〇○零_\-]{8,}/g, "")
+            .replace(/[；;:：,.，、]?[A-Za-z]{2,}[A-Za-z0-9〇○零_\-)）】]{6,80}$/g, "")
+            .replace(/[fF][.\-_*"']{2,}[0-9]*/g, "")
+            .replace(/給[0-9０-９]+$/g, "給")
+            .replace(/[_＿]{2,}/g, "")
+            .replace(/[■□◆◇●○◎▲△▼▽★☆]{1,}/g, "")
+            .replace(/[<>＜＞]{1,}/g, "")
+            .replace(/[~～]{2,}/g, "")
+            .replace(/[•·˙]{2,}/g, " ")
+            .replace(/[^\u4e00-\u9fa5A-Za-z0-9０-９，、。．,.；;：:？！?!（）()「」『』《》〈〉\-—…\/%＋+、\s]/g, "")
+            .replace(/看[fF][.\-]+[0-9０-９]*/g, "看")
+            .replace(/給麗?[0-9０-９]+/g, "給")
+            .replace(/給[；;]?[A-Za-z0-9]{4,}[\u4e00-\u9fa5]{0,2}[0-9０-９]*/g, "給")
+            .replace(/給[\u4e00-\u9fa5]{1,3}[0-9０-９]+$/g, "給")
+            .replace(/(出示[^。？！]{0,16})給$/g, "$1")
+            .replace(/[A-Za-z]{4,}$/g, "")
+            .replace(/[；;:：,.，、\-]+$/g, "")
+            .replace(/\s+/g, "");
+    };
+
+    var compactExcerptText = function(text, maxLen) {
+        text = String(text || "")
+            .replace(/[\r\n\t]+/g, "")
+            .replace(/\s+/g, "");
+        if (text.length > maxLen) text = text.substring(0, maxLen) + "…";
+        return text;
+    };
+
+    var highlightKeywordInText = function(text, keyword) {
+        text = String(text || "");
+        return text;
+    };
+
+    var normalizeExcerptKeyword = function(kw) {
+        if (kw === "連絡") return "聯絡";
+        if (kw === "轉賬" || kw === "匯款") return "轉帳";
+        if (kw === "賬號") return "帳號";
+        return kw;
+    };
+
+    var removeExcerptPageNoise = function(text) {
+        return String(text || "")
+            .replace(/第[0-9一二三四五六七八九十百零〇]+頁\/共[0-9一二三四五六七八九十百零〇]+頁/g, "")
+            .replace(/第[0-9一二三四五六七八九十百零〇]+頁共[0-9一二三四五六七八九十百零〇]+頁/g, "")
+            .replace(/共[0-9一二三四五六七八九十百零〇]+頁第[0-9一二三四五六七八九十百零〇]+頁/g, "")
+            .replace(/頁次[:：]?[0-9一二三四五六七八九十百零〇]+/g, "");
+    };
+
+    var cleanQaLine = function(text, label, alreadyNormalized) {
+        text = alreadyNormalized ? removeExcerptPageNoise(text) : removeExcerptPageNoise(normalizeExcerptBody(text));
+        text = formatExcerptQaLabels(text);
+        text = stripOcrNoise(text);
+        if (label === "問") text = text.replace(/^問[:：]?/, "");
+        if (label === "答") text = text.replace(/^答[:：]?/, "");
+        return text;
+    };
+
+    var isPersonalInfoQuestion = function(question) {
+        question = String(question || "").replace(/\s+/g, "");
+        if (!question) return false;
+
+        var hasIdentityField =
+            question.indexOf("姓名") !== -1 ||
+            question.indexOf("年籍") !== -1 ||
+            question.indexOf("住址") !== -1 ||
+            question.indexOf("住所") !== -1 ||
+            question.indexOf("居所") !== -1 ||
+            question.indexOf("身分證") !== -1 ||
+            question.indexOf("身份證") !== -1 ||
+            question.indexOf("統一編號") !== -1 ||
+            question.indexOf("出生") !== -1 ||
+            question.indexOf("性別") !== -1;
+
+        if (!hasIdentityField) return false;
+        if (/^(?:姓名|年籍|住址|住所|居所|身分證|身份證|統一編號|出生|性別|國民身分證)/.test(question)) return true;
+        if (/姓名.*年籍.*住址/.test(question)) return true;
+        if (/國民身分證.*統一編號/.test(question)) return true;
+        if (/被告$|證人$|告訴人$|關係人$|受詢問人$|受訊問人$/.test(question) && /姓名|年籍|住址|統一編號/.test(question)) return true;
+        return false;
+    };
+
+    var isQuestionMarkerAt = function(text, idx) {
+        if (idx <= 0) return true;
+        var prev = text.charAt(idx - 1);
+        if (prev === "詢" || prev === "訊" || prev === "請") return false;
+        return true;
+    };
+
+    var findNextQuestionMarker = function(text, fromIndex) {
+        var re = /問[:：]?/g;
+        re.lastIndex = fromIndex || 0;
+        var m;
+        while ((m = re.exec(text)) !== null) {
+            if (isQuestionMarkerAt(text, m.index)) return {index: m.index, end: re.lastIndex};
+        }
+        return null;
+    };
+
+    var isAnswerMarkerAt = function(text, idx) {
+        if (idx <= 0) return true;
+        var prev = text.charAt(idx - 1);
+        if (prev === "回" || prev === "解" || prev === "作") return false;
+        var next = text.charAt(idx + 1);
+        if (next === "覆" || next === "案") return false;
+        return true;
+    };
+
+    var formatExcerptQaLabels = function(text) {
+        text = text.replace(/問[:：]?/g, function(m, idx, all) {
+            return isQuestionMarkerAt(all, idx) ? "問：" : m;
+        });
+        text = text.replace(/答[:：]?/g, function(m, idx, all) {
+            return isAnswerMarkerAt(all, idx) ? "答：" : m;
+        });
+        return text;
+    };
+
+    var getExcerptPageBody = function(pageNum) {
+        if (pageCache[pageNum] && pageCache[pageNum].excerptBody !== undefined) return pageCache[pageNum].excerptBody;
+        var body = normalizeExcerptBody(getPageText(pageNum));
+        if (pageCache[pageNum] === undefined) pageCache[pageNum] = {};
+        pageCache[pageNum].excerptBody = body;
+        return body;
+    };
+
+    var getStatementUpperBound = function(item, statementStarts) {
+        var startPage = item.page;
+        var upperBound = totalPages - 1;
+        for (var i = 0; i < statementStarts.length; i++) {
+            if (statementStarts[i] > startPage) {
+                upperBound = statementStarts[i] - 1;
+                break;
+            }
+        }
+        return upperBound < startPage ? startPage : upperBound;
+    };
+
+    var extractQaFragmentsFromBody = function(text, pageNum) {
+        var fragments = [];
+        var searchFrom = 0;
+        var qm;
+        while ((qm = findNextQuestionMarker(text, searchFrom)) !== null) {
+            var qStart = qm.index;
+            var ansRe = /答[:：]?/g;
+            ansRe.lastIndex = qm.end;
+            var am = ansRe.exec(text);
+            if (!am) {
+                searchFrom = qm.end;
+                continue;
             }
 
+            searchFrom = am.index + 1;
+            var nextQ = findNextQuestionMarker(text, am.index + 1);
+            var segEnd = nextQ ? nextQ.index : Math.min(text.length, am.index + 650);
+            var question = cleanQaLine(text.substring(qStart, am.index), "問", true);
+            var answer = cleanQaLine(text.substring(am.index, segEnd), "答", true);
+            if (isPersonalInfoQuestion(question)) continue;
+            var kw = getExcerptKeyword(answer);
+            if (kw) {
+                fragments.push({
+                    keyword: normalizeExcerptKeyword(kw),
+                    page: pageNum,
+                    question: question,
+                    answer: answer
+                });
+            }
+        }
+        return fragments;
+    };
+
+    var extractStatementHighlights = function(statementList) {
+        var starts = [];
+        for (var i = 0; i < statementList.length; i++) starts.push(statementList[i].page);
+        starts.sort(function(a, b) { return a - b; });
+
+        for (var si = 0; si < statementList.length; si++) {
+            var item = statementList[si];
+            item.excerpts = [];
+
+            var upperBound = getStatementUpperBound(item, starts);
+            var maxLookAhead = Math.min(upperBound, item.page + 35);
+            var lastQaPage = item.page;
+            var seenQa = false;
+            var blankAfterQa = 0;
+            var used = {};
+
+            for (var p = item.page; p <= maxLookAhead; p++) {
+                var body = getExcerptPageBody(p);
+                if (hasQaMarker(body)) {
+                    lastQaPage = p;
+                    seenQa = true;
+                    blankAfterQa = 0;
+
+                    var pageFragments = extractQaFragmentsFromBody(body, p);
+                    for (var fi = 0; fi < pageFragments.length; fi++) {
+                        var frag = pageFragments[fi];
+                        var fp = frag.keyword + "|" + frag.question.substring(0, 60) + "|" + frag.answer.substring(0, 60);
+                        if (used[fp]) continue;
+                        used[fp] = true;
+                        item.excerpts.push(frag);
+                        if (item.excerpts.length >= 5) break;
+                    }
+                    if (item.excerpts.length >= 5) break;
+                } else if (seenQa) {
+                    blankAfterQa++;
+                    if (blankAfterQa >= 3) break;
+                }
+            }
+            item.endPage = lastQaPage;
+        }
+        return statementList;
+    };
+
+    // V11.0.0：報表改由 app.execDialog 呈現，故兩個 build 函式只「回傳行陣列」，
+    // 由主程式統一組裝後丟進對話框（execDialog 失敗時再退回主控台）。
+    var HEAVY_SEP = "────────";
+
+    var buildStatementHighlights = function(statementList) {
+        var lines = [];
+        lines.push("📌 供述重點問答摘錄");
+        if (!statementList || statementList.length === 0) {
+            lines.push("（未偵測到供述證據，無摘錄）");
+            return lines;
+        }
+        lines.push("僅列出「答」命中關鍵字的問答；問句完整顯示，答覆限 120 字。");
+        lines.push("同頁問答合併於同一編號；不同當事人之間以粗線分隔。");
+        lines.push("");
+        lines.push("編號 | 筆錄名稱 | PDF頁碼 | 關鍵字");
+        lines.push("");
+
+        // V11.0.0：以「當事人(人)」為粗分隔線的界線，而非以每一份筆錄。
+        // 標題格式為 <姓名><民國YYYMMDD><類型>，取到日期前即為姓名（含「證人」、
+        // 「等N人」等前後綴）。statementList 已依姓名排序，同一當事人之筆錄相鄰，
+        // 故只需在「換人」時放粗線；同一人之多份筆錄之間僅以空行分隔。
+        var personKeyOf = function(title) {
+            var dm = String(title).match(/(?:1[0-2]\d)\d{4}/);
+            return dm ? title.substring(0, dm.index) : String(title);
+        };
+
+        var rowCount = 0;
+        var emittedAny = false;
+        var prevPerson = null;
+        for (var i = 0; i < statementList.length; i++) {
+            var item = statementList[i];
+            if (!item.excerpts || item.excerpts.length === 0) continue;
+
+            var personKey = personKeyOf(item.title);
+            if (emittedAny) {
+                if (personKey !== prevPerson) {
+                    lines.push("");
+                    lines.push(HEAVY_SEP);   // 換人 → 粗分隔線
+                    lines.push("");
+                } else {
+                    lines.push("");          // 同一當事人、不同筆錄 → 僅空行
+                }
+            }
+            emittedAny = true;
+            prevPerson = personKey;
+
+            // 摘錄產生時即依頁碼升冪排列，故同頁片段必為連續區段；逐頁分組輸出。
+            var g = 0;
+            var firstGroup = true;
+            while (g < item.excerpts.length) {
+                var pageNum = item.excerpts[g].page;
+                var group = [];
+                var kws = [];
+                var seenKw = {};
+                while (g < item.excerpts.length && item.excerpts[g].page === pageNum) {
+                    var exg = item.excerpts[g];
+                    group.push(exg);
+                    if (!seenKw[exg.keyword]) { seenKw[exg.keyword] = true; kws.push(exg.keyword); }
+                    g++;
+                }
+
+                if (!firstGroup) lines.push("");  // 同一筆錄、不同頁群組 → 僅空行
+                firstGroup = false;
+
+                rowCount++;
+                var serial = rowCount < 10 ? "0" + rowCount : String(rowCount);
+                lines.push("[" + serial + "] | " + item.title + " | P" + (pageNum + 1) + " | " + kws.join("、"));
+                for (var k = 0; k < group.length; k++) {
+                    if (k > 0) lines.push("");
+                    var ex = group[k];
+                    var answerText = compactExcerptText(ex.answer, 120);
+                    lines.push("    問：" + ex.question);
+                    lines.push("    答：" + answerText);  // V11.0.0：取消 【】 關鍵字標亮
+                }
+            }
+        }
+        if (rowCount === 0) lines.push("（未命中）本次未找到答覆命中關鍵字的問答片段。");
+        return lines;
+    };
+
+    var buildBookmarkHits = function(statementList, docList, suppressedCount) {
+        var lines = [];
+        lines.push("📑 命中書籤清單");
+
+        if (statementList && statementList.length > 0) {
+            lines.push("供述證據（" + statementList.length + " 份）");
+            for (var i = 0; i < statementList.length; i++) {
+                lines.push("  [" + (i + 1) + "] " + statementList[i].title + " (P" + (statementList[i].page + 1) + ")");
+            }
+        } else {
+            lines.push("供述證據：未命中");
+        }
+
+        if (docList && docList.length > 0) {
+            lines.push("非供述證據（" + docList.length + " 份）");
+            for (var j = 0; j < docList.length; j++) {
+                lines.push("  [" + (j + 1) + "] " + docList[j].title + " (P" + (docList[j].page + 1) + ")");
+            }
+        } else {
+            lines.push("非供述證據：未命中");
+        }
+
+        if (suppressedCount > 0) {
+            lines.push("已略過同標題且續頁文字相同之重複供述書籤 " + suppressedCount + " 筆。");
+        }
+        return lines;
+    };
+
+    // V11.0.0：自訂對話框呈現報表，可整份全選複製；失敗則退回主控台。
+    // 不修改卷證 PDF（execDialog 僅為彈窗）。
+    var showReportDialog = function(reportText) {
+        var dlgText = String(reportText).replace(/\n/g, "\r");
+        if (dlgText.length > 60000) dlgText = dlgText.substring(0, 60000) + "\r…（報表過長，餘略，請見主控台）";
+        var shown = false;
+        try {
+            var dlg = {
+                initialize: function(dialog) { dialog.load({ "Body": dlgText }); },
+                description: {
+                    name: "SmartMark 報表　★請先 Ctrl+A 全選 → Ctrl+C 複製，再按 OK★",
+                    elements: [
+                        {
+                            type: "view",
+                            align_children: "align_left",
+                            elements: [
+                                { type: "static_text", item_id: "Lbl1",
+                                  name: "下列為書籤清單與供述重點摘要。請在下框點一下 → Ctrl+A 全選 → Ctrl+C 複製：" },
+                                // 對話框大小由這兩個數值決定（單位：字元數）。
+                                // 24 吋 / 1920×1080 建議 120×38；如需再調，放大這兩個值即可，
+                                // 高度過大（超過約 42）在 1080p 可能被螢幕裁切。
+                                { type: "edit_text", item_id: "Body",
+                                  multiline: true, readonly: false,
+                                  char_width: 120, char_height: 38, font: "default" },
+                                // 緊鄰 OK 鈕的提醒：避免使用者未複製就關閉視窗。
+                                // （標準 OK 鈕文字無法跨版本穩定改名，故改以醒目文字提醒。）
+                                { type: "static_text", item_id: "Lbl2",
+                                  name: "※ 重要：按下【OK】後本視窗會立即關閉、內容不再保留。請務必先在上框 Ctrl+A 全選並 Ctrl+C 複製後，再按 OK。" },
+                                { type: "ok", item_id: "ok" }
+                            ]
+                        }
+                    ]
+                }
+            };
+            app.execDialog(dlg);
+            shown = true;
+        } catch (e) {
+            shown = false;
+        }
+        if (!shown) {
+            console.println("（提示：自訂對話框無法開啟，改於主控台輸出完整報表。）");
+            console.println(reportText);
+        }
+    };
+
+    // ── 主執行迴圈 ──
+    if (doScan) {
+        // 沙盒 console 不支援同列覆寫，故每次更新都是新增一行。
+        // V11.0.0：進度改為「每 5% 或每 20 頁，取較密者」更新，並保證最後一頁
+        // 顯示 100%，避免大卷宗在兩次更新之間靜止太久讓人誤以為當機。
+        var progressStep = Math.max(1, Math.min(Math.ceil(totalPages * 0.05), 20));
+        var lastProgressPage = -1;
+        var makeProgressBar = function(pct) {
+            var barLength = 20;
+            var filledLength = Math.floor(barLength * (pct / 100));
+            var bar = "";
+            for (var b = 0; b < filledLength; b++) bar += "█";
+            for (var s = filledLength; s < barLength; s++) bar += "░";
+            return bar;
+        };
+        var reportScanProgress = function(pageIndex) {
+            var isLast = (pageIndex === totalPages - 1);
+            if (!isLast && (pageIndex - lastProgressPage) < progressStep) return;
+            lastProgressPage = pageIndex;
+            var currentPct = Math.floor((pageIndex + 1) / totalPages * 100);
+            console.println("⏳ 掃描進度：[" + makeProgressBar(currentPct) + "] " + currentPct + "%（" + (pageIndex + 1) + "/" + totalPages + " 頁）");
+        };
+        console.println("⏳ 開始掃描：共 " + totalPages + " 頁（每 " + progressStep + " 頁回報一次），完成後以對話框列出結果。");
+        console.println("⏳ 掃描進度：[" + makeProgressBar(0) + "] 0%（0/" + totalPages + " 頁）");
+
+        var __scanT0 = new Date();   // V11.0.0：掃描計時起點（供收尾行顯示「耗時」）
+        for (var p = 0; p < totalPages; p++) {
             var quickStr = getPageTextFast(p);
-            if (quickStr === "" || !reRough.test(quickStr)) continue;
+            if (quickStr === "" || !reRough.test(quickStr)) {
+                reportScanProgress(p);
+                continue;
+            }
 
             var ct = (pageCache[p] && pageCache[p].text !== undefined) ? pageCache[p].text : getPageText(p);
+            registerIdNameHints(ct);
 
             var cls = classifyPage(ct);
 
             // 重要：先判斷是否為供述筆錄，再排除起訴書、處刑書等法律文書。
             // 避免真正的警詢／偵訊筆錄只因權利告知中出現「刑事訴訟法」而被跳過。
             if (!cls) {
-                if (isClearlyProsecutionDisposition(ct)) continue;
-                if (ct.indexOf("犯罪事實") !== -1 && (ct.indexOf("移送偵辦") !== -1 || ct.indexOf("分敘如下") !== -1)) continue;
-                if (ct.indexOf("職務報告") !== -1 || ct.indexOf("刑事案件報告書") !== -1) continue;
-                if (ct.indexOf("偵查卷宗") !== -1 || ct.indexOf("分案日期") !== -1) continue;
+                if (isClearlyProsecutionDisposition(ct)) {
+                    reportScanProgress(p);
+                    continue;
+                }
+                if (ct.indexOf("犯罪事實") !== -1 && (ct.indexOf("移送偵辦") !== -1 || ct.indexOf("分敘如下") !== -1)) {
+                    reportScanProgress(p);
+                    continue;
+                }
+                if (ct.indexOf("職務報告") !== -1 || ct.indexOf("刑事案件報告書") !== -1) {
+                    reportScanProgress(p);
+                    continue;
+                }
+                // 偵查卷宗封面／卷宗目錄一律跳過；含 OCR 異體字（査／曰）變體。
+                if (ct.indexOf("偵查卷宗") !== -1 || ct.indexOf("偵査卷宗") !== -1 ||
+                    ct.indexOf("分案日期") !== -1 || ct.indexOf("分案曰期") !== -1) {
+                    reportScanProgress(p);
+                    continue;
+                }
             }
 
             if (cls) {
@@ -1004,7 +1761,7 @@
                         var nw = reChName.exec(aw);
                         if (nw) {
                             var cw = trimName(nw[0]);
-                            if (!reWitNotName.test(cw) && cw.length >= 2) {
+                            if (!reWitNotName.test(cw) && !isInvalidNameCandidate(cw)) {
                                 var dup = false;
                                 for (var di = 0; di < wNames.length; di++) {
                                     if (wNames[di] === cw) { dup = true; break; }
@@ -1016,12 +1773,14 @@
                     }
                     var rep = wNames.length > 0 ? wNames[wNames.length - 1] : null;
                     if (rep) {
+                        rep = recoverEnglishSpacing(p, rep);
                         title = wNames.length === 1 ? "證人" + rep + dateStr + recordType : "證人" + rep + "等" + wNames.length + "人" + dateStr + recordType;
                     } else {
                         title = "證人未知" + dateStr + recordType;
                     }
                 } else {
                     var nr = extractName(ct, isDetention);
+                    if (nr) nr = recoverEnglishSpacing(p, nr);
                     title = (nr ? nr : "未知對象") + dateStr + recordType;
                 }
 
@@ -1030,14 +1789,17 @@
                     page: p,
                     bodyKey: makeStatementContinuationKey(ct),
                     scanSeq: statementList.length,
+                    session: extractSessionNo(ct),
                     isDup: false
                 });
-                console.println("    📝 供述: " + title + " (第 " + (p + 1) + " 頁)");
 
             } else {
                 var docResult = classifyDoc(ct);
                 if (docResult) {
-                    if (docResult.type === "SKIP") continue;
+                    if (docResult.type === "SKIP") {
+                        reportScanProgress(p);
+                        continue;
+                    }
 
                     var finalTitle;
                     var base = docResult.base;
@@ -1045,6 +1807,7 @@
                     if (base === "金融機構交易明細表") {
                         if (p <= lastFinStatementPage + 3 && lastFinStatementPage >= 0) {
                             lastFinStatementPage = p;
+                            reportScanProgress(p);
                             continue;
                         } else {
                             lastFinStatementPage = p;
@@ -1073,9 +1836,9 @@
                     }
 
                     docList.push({title: finalTitle, page: p});
-                    console.println("    📁 非供述: " + finalTitle + " (第 " + (p + 1) + " 頁)");
                 }
             }
+            reportScanProgress(p);
         }
 
         // ── 建立書籤與整理 (強制全部後綴 (P頁碼)) ──
@@ -1086,11 +1849,14 @@
         var suppressedStatementDupCount = dedupResult.suppressedCount || 0;
 
         var totalFound = statementList.length + docList.length;
-        console.println("─────────────────────────────────");
-        console.println("✔ 掃描完畢：供述證據 " + statementList.length + " 份，非供述證據 " + docList.length + " 份。");
-        if (suppressedStatementDupCount > 0) {
-            console.println("    ↳ 已略過同標題且續頁文字相同之重複供述書籤 " + suppressedStatementDupCount + " 筆。");
-        }
+
+        // V11.0.0：主控台收尾行顯示「掃描耗時」，方便對外引用實機速度。
+        // （此數字為「頁面掃描」時間；摘錄、建書籤與存檔在此行之後，通常僅再增數秒。）
+        var __scanSec = ((new Date() - __scanT0) / 1000).toFixed(1);
+        console.println("✔ 掃描完畢，耗時 " + __scanSec + " 秒（" + totalPages + " 頁；供述 " + statementList.length + " 份／非供述 " + docList.length + " 份），詳見對話框。");
+
+        // 先算出供述重點摘錄（供對話框使用）。
+        statementList = extractStatementHighlights(statementList);
 
         if (totalFound > 0) {
             var rootBkmk = doc.bookmarkRoot;
@@ -1135,38 +1901,56 @@
                 }
             }
 
-            // ── 自動存檔 ──
+            // ── 自動存檔（存檔狀態併入對話框，主控台不另外輸出） ──
             var saveOk = false;
+            var saveMsg = "";
             try {
                 app.execMenuItem("Save");
                 saveOk = true;
-                console.println("💾 自動存檔完成：" + doc.path);
+                saveMsg = "💾 已自動存檔至原路徑：" + doc.path;
             } catch(e1) {
                 try {
                     doc.saveAs({cPath: doc.path});
                     saveOk = true;
-                    console.println("💾 備援存檔完成：" + doc.path);
+                    saveMsg = "💾 備援存檔完成：" + doc.path;
                 } catch(e2) {
-                    console.println("⚠️ 存檔失敗：" + e2);
+                    saveMsg = "⚠️ 自動存檔失敗，請手動按 Ctrl+S 存檔。（" + e2 + "）";
                 }
             }
 
-            // ── 提示視窗 ──
-            var finalMsg = "✅ 書籤建立完成！\n\n"
-                + "書籤結構：\n"
-                + "📋 智慧書籤清單\n"
-                + "  ├ 📝 供述證據（" + statementList.length + " 份，已附加頁碼後綴）\n"
-                + "  └ 📁 非供述證據（" + docList.length + " 份，已附加頁碼後綴）\n";
+            // ── 組裝報表（結構摘要/存檔狀態置頂 → 書籤清單 → 問答摘要） ──
+            var report = [];
+            report.push("✅ 書籤建立完成！");
+            report.push("");
+            report.push("書籤結構：");
+            report.push("📋 智慧書籤清單");
+            report.push("  ├ 📝 供述證據（" + statementList.length + " 份，已附加頁碼後綴）");
+            report.push("  └ 📁 非供述證據（" + docList.length + " 份，已附加頁碼後綴）");
             if (suppressedStatementDupCount > 0) {
-                finalMsg += "\n✅ 已略過同標題且續頁文字相同之重複供述書籤：" + suppressedStatementDupCount + " 筆。\n";
+                report.push("");
+                report.push("✅ 已略過同標題且續頁文字相同之重複供述書籤：" + suppressedStatementDupCount + " 筆。");
             }
             if (dupNames.length > 0) {
-                finalMsg += "\n⚠️ 同標題但續頁文字不同者已自動編號，請確認是否為不同證據資料：\n";
-                for (var i = 0; i < dupNames.length; i++) finalMsg += "  · " + dupNames[i] + "\n";
+                report.push("");
+                report.push("⚠️ 同標題但續頁文字不同者已自動編號，請確認是否為不同證據資料：");
+                for (var i = 0; i < dupNames.length; i++) report.push("  · " + dupNames[i]);
             }
-            finalMsg += "\n" + (saveOk ? "💾 已自動存檔至原路徑。" : "⚠️ 自動存檔失敗，請手動按 Ctrl+S 存檔。");
+            report.push("");
+            report.push(saveMsg);
+            report.push("");
+            report.push(HEAVY_SEP);
+            report.push("");
 
-            app.alert({cMsg: finalMsg, nIcon: 3, nType: 0, cTitle: "✅ SmartMark Pro V10.4 完成"});
+            var hitLines = buildBookmarkHits(statementList, docList, suppressedStatementDupCount);
+            for (var i = 0; i < hitLines.length; i++) report.push(hitLines[i]);
+            report.push("");
+            report.push(HEAVY_SEP);
+            report.push("");
+
+            var excLines = buildStatementHighlights(statementList);
+            for (var i = 0; i < excLines.length; i++) report.push(excLines[i]);
+
+            showReportDialog(report.join("\n"));
         } else {
             app.alert({cMsg: "掃描完成，未發現符合特徵的文件頁面。", nIcon: 3, nType: 0, cTitle: "SmartMark Pro 完成"});
         }
