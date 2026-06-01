@@ -1,12 +1,26 @@
 // ==========================================================================
 // SmartMark Pro 刑案電子卷證：書籤草稿自動建立腳本
-// 版本：V11.0.0（正式版）
+// 版本：V11.0.2（正式版）
 // 功能：掃描刑案電子卷證 PDF，自動建立「供述證據／非供述證據」書籤，並擷取
 //       供述筆錄中命中關鍵字的問答原文摘要，以可複製對話框呈現。
 //
+// V11.0.2 相較 V11.0.1 之改良：
+//   ★【修正】放寬「法官訊問筆錄」辨識門檻。實測部分卷宗的直書標題「訊問筆錄」
+//      會被右側行號／浮水印碼插入打散，導致文字層無連續「訊問筆錄」字串而漏判。
+//      本版不再強制要求連續標題字串，改以「法官問／審判長問」或「法庭＋法官」等
+//      法院訊問特徵，搭配「出席職員如下」與供述角色（被告／證人／告訴人／關係人答）
+//      綜合判斷；仍排除準備程序筆錄、審判筆錄，並與檢察官偵訊（檢察官問／偵查庭）區別。
+//
+// V11.0.1 相較 V11.0.0 之改良：
+//   ★【分類】新增「法官訊問筆錄」辨識規則（歸類供述證據）。法院於準備程序／
+//      審判期日以外，由法官在法庭訊問被告之「訊問筆錄」（如羈押訊問），
+//      過去易被誤判為檢察官「偵訊筆錄」或漏判。以「出席職員如下＋法庭＋法官問」
+//      等特徵，與偵訊（檢察官）、準備程序、審判筆錄區別。
+//      書籤命名範例：「游志騰1140321法官訊問筆錄」。排序權重介於偵訊與準備程序之間。
+//
 // 一、辨識能力
 //   · 供述：警詢／調查／廉詢筆錄、偵訊筆錄（檢察官）、詢問筆錄（檢察事務官）、
-//          準備程序筆錄、審判筆錄、交通事故談話紀錄表等。
+//          法官訊問筆錄（法院）、準備程序筆錄、審判筆錄、交通事故談話紀錄表等。
 //   · 非供述：金融交易明細、相片影像查詢、診斷證明、鑑定書、各式交通事故表單、
 //          刑事告訴狀、答辯狀、刑事委任狀…等。
 //   · 姓名：中文姓名；外國人英文姓名（自動還原空白，如 Chen Mo Mo）。
@@ -44,7 +58,7 @@
     var idNameMap = {};
 
     console.clear();
-    console.println("🚀 SmartMark Pro V11.0.0 啟動中...");
+    console.println("🚀 SmartMark Pro V11.0.2 啟動中...");
     console.println("📄 總頁數：" + totalPages + " 頁");
     console.println("⏳ 系統已鎖定民國100～129年之3位數日期，並優先以筆錄日期欄位判斷...");
     console.println("─────────────────────────────────");
@@ -56,7 +70,7 @@
 
     // ── 預編譯 RegExp (全部優化為字面量宣告，確保在沙盒中無語法轉義坑) ──
     var reRough = /筆錄|調查|偵訊|警詢|詢問|審判|準備程序|出席職員|偵查庭|檢察官問|搜索|扣押|鑑定|採尿|攝影時間|相片影像|解剖|醫鑑字|送驗資料|刑事警察局|廉政署|肅貪組|調查局|調查處|機動工作站|存款交易明細|往來交易明細|診斷證明書|扣押物品照片|酒精測定|交通事故|肇事人自首|醫院|照片黏貼紀錄表|初步分析研判表|現場圖|談話紀錄表|當時天候|有無飲酒|鑑定意見書|駕籍詳細|車輛詳細|職務報告|身分證統一編號|支出金額|存入金額|帳號|交易時間|交易序號|165專線|詐騙帳戶|被害人受騙款項|刑事辯護意旨|刑事答辯狀|辯護意旨狀|答辯狀|刑事告訴狀|刑事委任狀|承辦股別|相驗屍體證明書|成人保護案件通報表|歸檔案號|刑案現場勘察報告|勘察目的|勘察人員|國民身分證|受詢/;
-    
+
     // 🚀 關鍵升級：鎖定民國3位數日期。
     // V10.2 註解寫 100～119 年，但實際只吃 113～117 年；本版放寬為 100～129 年，
     // 並在 findDateGlobal / extractStatementDate 中避開出生年月日等非筆錄日期欄位。
@@ -68,7 +82,7 @@
     var reDateDotg   = /(1[0-2]\d)\.(\d{1,2})\.(\d{1,2})/g;
     var reBadDateContext = /出生|生日|年籍|戶籍|身分證|國民身分證|出生年月日|出生日期|出生年|出生月|出生地/;
     var reNicknameLabel = /綽號|绰號|绰号|缚號|缚号|縛號|縛号|缔號|缔号|暱稱|暱名|別名|外號/;
-    
+
     // 避免把姓名中的「有、無、生、住」等字切掉；只針對完整欄位詞截斷。
     var reTailCut    = /(性別|出生年月日|出生日期|出生|年籍|戶籍|住居所|住所|住址|身分證|國民身分證|統一編號|綽號|绰號|绰号|缚號|缚号|縛號|縛号|缔號|缔号|暱稱|暱名|別名|外號|年齡|歲).*$/;
     var reChName     = /^[\u4e00-\u9fa5]{2,5}/;
@@ -589,7 +603,7 @@
         var c4 = (has("存入") || has("存人") || has("金額")) ? 1 : 0;
         if ((c1 + c2 + c3 + c4) >= 3) {
             if (has("收執聯") || has("執據聯") || has("匯款申請書") || has("匯款申") || has("無摺存款") || has("入戶匯款") || has("匯款種類") || has("匯款金額") || has("國內匯款")) {
-                return {type: "SKIP"}; 
+                return {type: "SKIP"};
             }
             return {type: "金融機構交易明細表", base: "金融機構交易明細表"};
         }
@@ -728,7 +742,12 @@
         var hasProsecutorOfficer = ct.indexOf("檢察事務官") !== -1;
         var hasProsecutorOfficerInquiry = hasProQOff && hasProsecutorOfficer && hasIdCard;
         var primaryRole = detectPrimaryRole(ct);
-        
+
+        // V11.0.1：法院（法官）訊問特徵，用於辨識「法官訊問筆錄」並與檢察官偵訊區別。
+        var hasCourtRoom = ct.indexOf("法庭") !== -1;
+        var hasJudgeRole = ct.indexOf("法官") !== -1 || ct.indexOf("審判長") !== -1;
+        var hasJudgeQ    = ct.indexOf("法官問") !== -1 || ct.indexOf("審判長問") !== -1;
+
         var hasEconomy = ct.indexOf("經濟狀況") !== -1;
         var hasInqRec  = ct.indexOf("訊問筆錄") !== -1;
         var hasInvRec  = ct.indexOf("調查筆錄") !== -1;
@@ -757,6 +776,21 @@
             return {type: "詢問筆錄", witness: primaryRole === "witness", detention: true};
         }
 
+        // V11.0.2：法官訊問筆錄（法院於準備程序／審判期日以外，由法官在法庭訊問
+        // 被告之「訊問筆錄」，例如羈押訊問）。歸類供述證據。
+        //   ‧ 不再強制要求連續標題字串「訊問筆錄」——實測部分卷宗的直書標題會被
+        //     右側行號／浮水印碼插入打散（hasInqRec=false），改以法院訊問特徵綜合判斷。
+        //   ‧ 與偵訊筆錄（檢察官）區別：問者為法官（法官問／審判長問）或在「法庭」進行；
+        //     檢察官偵訊用「檢察官問」「偵查庭」，不會命中 hasJudgeQ／hasCourtRoom。
+        //   ‧ 與準備程序／審判筆錄區別：未含「準備程序筆錄」「審判筆錄」標題。
+        //   ‧ hasStaff（出席職員如下）為開庭筆錄首頁標記；續頁無此欄位故只標首頁。
+        // 須在通用偵訊規則之前判斷，避免被歸成檢察官偵訊筆錄。
+        var hasAnyAnswer = hasDefAns || hasWitAns || hasCompAns || hasRelAns;
+        if (!hasPrepare && !hasJudge && hasStaff && hasAnyAnswer &&
+            (hasJudgeQ || (hasCourtRoom && hasJudgeRole))) {
+            return {type: "法官訊問筆錄", witness: primaryRole === "witness", detention: true};
+        }
+
         // 偵訊／審判類：同頁同時出現「被告答」與「證人答」時，不再直接判為證人，
         // 而是以最早出現的主要問答角色作為該頁主體。
         if (hasInqRec && hasWitAns && hasIdCard && primaryRole === "witness") return {type: "偵訊筆錄", witness: true, detention: true};
@@ -770,7 +804,7 @@
         if (hasProQOff && hasIdCard) return {type: "詢問筆錄", witness: false, detention: true};
         if (hasInqRec && hasWitAns && hasIdCard && !hasDefAns) return {type: "偵訊筆錄", witness: true, detention: true};
         if (hasPoliceInquiryProfile) return {type: "警詢筆錄", witness: false, detention: false};
-        
+
         if ((hasEconomy || hasPoliceId) && (hasInvRec || hasPolice)) {
             return {type: "警詢筆錄", witness: false, detention: false};
         }
@@ -1026,6 +1060,7 @@
         var typeOrder = 5;
         if (title.indexOf("警詢筆錄") !== -1 || title.indexOf("調查筆錄") !== -1 || title.indexOf("廉詢筆錄") !== -1 || title.indexOf("詢問筆錄") !== -1) typeOrder = 1;
         else if (title.indexOf("偵訊筆錄") !== -1) typeOrder = 2;
+        else if (title.indexOf("法官訊問筆錄") !== -1) typeOrder = 2.5; // V11.0.1：介於偵查（偵訊）與審判前準備程序之間
         else if (title.indexOf("準備程序") !== -1) typeOrder = 3;
         else if (title.indexOf("審判筆錄") !== -1) typeOrder = 4;
 
