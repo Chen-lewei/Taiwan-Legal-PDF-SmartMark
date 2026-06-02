@@ -1,8 +1,30 @@
 // ==========================================================================
 // SmartMark Pro 刑案電子卷證：書籤草稿自動建立腳本
-// 版本：V11.0.2（正式版）
+// 版本：V11.0.3（正式版）
 // 功能：掃描刑案電子卷證 PDF，自動建立「供述證據／非供述證據」書籤，並擷取
 //       供述筆錄中命中關鍵字的問答原文摘要，以可複製對話框呈現。
+//
+// V11.0.3 相較 V11.0.2 之改良：
+//   ★【搜索扣押筆錄．文件範圍化】把「搜索扣押筆錄」視為一份跨頁文件：以搜索扣押
+//      筆錄首頁為起、以「扣押物品目錄表」為終。首頁建立「<司法警察機關>搜索扣押
+//      筆錄」書籤、終頁建立「扣押物品目錄表」書籤，中間頁（同意書、收據等）不另建
+//      書籤。機關名以模糊對照表還原（長詞 OCR 易斷字，故不比對全名）；同卷多份時
+//      只用機關名、重複自動加序號。
+//   ★【供述摘要】關鍵字新增針對性強之共犯結構用語：共犯、車手、人頭、機房、
+//      犯罪所得、分工、提領、報酬（排於清單前段，優先作為摘要標籤）。每份筆錄摘要
+//      仍硬上限 5 條、每問答最多 1 條、且去重，故不會爆量。
+//   ★【非供述書籤編號】改為「同名才編號」：同一名稱出現 2 次以上者，依頁序加
+//      1、2、3…（如搜索扣押筆錄1、搜索扣押筆錄2）；僅 1 次者維持原名。因皆依頁序
+//      編號，搜索扣押筆錄N 與其文件範圍內之扣押物品目錄表N 會自然配對。
+//   ★【終頁判別放寬】扣押物品目錄表改以「標題＋至少 2 個表格欄位（品名／數量／
+//      單位／編號／持有人／廠牌／型號／備考／所有人）」判斷，容忍「品名」OCR 斷字，
+//      仍可排除筆錄結果頁之指涉句「詳如扣押物品目錄表（如附件）」（欄位數=0）。
+//   ★【位置型判別】以 getPageBox＋getPageNthWordQuads 取標題座標，換算 topRatio。
+//      扣押物品目錄表標題在頁首（topRatio≈0.10，門檻 0.30）即判為終頁；座標工具
+//      keywordTopRatio 以「去空白後」比對，相容每字夾空白之標題（如「照 片 黏 貼 表」）。
+//   ★【照片黏貼表】新增辨識：標題「照片黏貼表」在頁首（topRatio≈0.05，門檻 0.20）即建
+//      「照片黏貼表」書籤；次頁或次次頁仍見標題（中間可夾空白頁）視為同一份續頁、只建一次；
+//      同卷多份依「同名才編號」→ 照片黏貼表1、照片黏貼表2…。
 //
 // V11.0.2 相較 V11.0.1 之改良：
 //   ★【修正】放寬「法官訊問筆錄」辨識門檻。實測部分卷宗的直書標題「訊問筆錄」
@@ -58,7 +80,7 @@
     var idNameMap = {};
 
     console.clear();
-    console.println("🚀 SmartMark Pro V11.0.2 啟動中...");
+    console.println("🚀 SmartMark Pro V11.0.3 啟動中...");
     console.println("📄 總頁數：" + totalPages + " 頁");
     console.println("⏳ 系統已鎖定民國100～129年之3位數日期，並優先以筆錄日期欄位判斷...");
     console.println("─────────────────────────────────");
@@ -69,7 +91,7 @@
     var targetWatermark = "=*M*T*E*1*M*D*U*y*N*j*E*x*M*z*Y*z*M*G*N*s*c*m*4*x*N*z*I*u*M*z*A*u*M*S*4*y*M*j*I*=@";
 
     // ── 預編譯 RegExp (全部優化為字面量宣告，確保在沙盒中無語法轉義坑) ──
-    var reRough = /筆錄|調查|偵訊|警詢|詢問|審判|準備程序|出席職員|偵查庭|檢察官問|搜索|扣押|鑑定|採尿|攝影時間|相片影像|解剖|醫鑑字|送驗資料|刑事警察局|廉政署|肅貪組|調查局|調查處|機動工作站|存款交易明細|往來交易明細|診斷證明書|扣押物品照片|酒精測定|交通事故|肇事人自首|醫院|照片黏貼紀錄表|初步分析研判表|現場圖|談話紀錄表|當時天候|有無飲酒|鑑定意見書|駕籍詳細|車輛詳細|職務報告|身分證統一編號|支出金額|存入金額|帳號|交易時間|交易序號|165專線|詐騙帳戶|被害人受騙款項|刑事辯護意旨|刑事答辯狀|辯護意旨狀|答辯狀|刑事告訴狀|刑事委任狀|承辦股別|相驗屍體證明書|成人保護案件通報表|歸檔案號|刑案現場勘察報告|勘察目的|勘察人員|國民身分證|受詢/;
+    var reRough = /筆錄|調查|偵訊|警詢|詢問|審判|準備程序|出席職員|偵查庭|檢察官問|搜索|扣押|鑑定|採尿|攝影時間|相片影像|解剖|醫鑑字|送驗資料|刑事警察局|廉政署|肅貪組|調查局|調查處|機動工作站|存款交易明細|往來交易明細|診斷證明書|扣押物品照片|酒精測定|交通事故|肇事人自首|醫院|照片黏貼紀錄表|照片黏貼表|初步分析研判表|現場圖|談話紀錄表|當時天候|有無飲酒|鑑定意見書|駕籍詳細|車輛詳細|職務報告|身分證統一編號|支出金額|存入金額|帳號|交易時間|交易序號|165專線|詐騙帳戶|被害人受騙款項|刑事辯護意旨|刑事答辯狀|辯護意旨狀|答辯狀|刑事告訴狀|刑事委任狀|承辦股別|相驗屍體證明書|成人保護案件通報表|歸檔案號|刑案現場勘察報告|勘察目的|勘察人員|國民身分證|受詢/;
 
     // 🚀 關鍵升級：鎖定民國3位數日期。
     // V10.2 註解寫 100～119 年，但實際只吃 113～117 年；本版放寬為 100～129 年，
@@ -94,18 +116,39 @@
     var reClean1     = /[\s　]+/g;
     var reEnName     = /^[A-Za-z][A-Za-z ]+/;
 
-    // ── 重複書籤計數器 ──
-    var docCounter = {};
+    // ── 非供述書籤命名 ──
+    // V11.0.3：掃描階段一律回傳「基底名稱」（不在此編號）；待全卷掃完後，再由
+    // renumberDocList 依「同名才編號」規則統一處理（同名 → 名稱1、名稱2…；單一 → 不編號）。
+    // 如此可讓「搜索扣押筆錄N」與「扣押物品目錄表N」因皆依頁序編號而自然配對。
     var getBookmarkTitle = function(baseName) {
-        if (docCounter[baseName] === undefined) docCounter[baseName] = 0;
-        docCounter[baseName]++;
-        return docCounter[baseName] === 1 ? baseName : baseName + docCounter[baseName];
+        return baseName;
+    };
+    // 同名非供述書籤自動編號：出現 2 次以上者，依頁序加 1、2、3…；僅 1 次者維持原名。
+    var renumberDocList = function(list) {
+        var counts = {};
+        for (var i = 0; i < list.length; i++) {
+            counts[list[i].title] = (counts[list[i].title] || 0) + 1;
+        }
+        var seen = {};
+        for (var i = 0; i < list.length; i++) {
+            var t = list[i].title;
+            if (counts[t] >= 2) {
+                seen[t] = (seen[t] || 0) + 1;
+                list[i].title = t + seen[t];
+            }
+        }
+        return list;
     };
 
     // ── 單次文件旗標（每種類只建第一頁） ──
     var photoAdded = false, seizurePhotoAdded = false, bankDetailAdded = false, bankTxAdded = false;
     var trafficRptAdded = false, trafficRpt2Added = false, trafficPhotoAdded = false, casePhotoAdded = false;
     var lastFinStatementPage = -99;
+
+    // V11.0.3：搜索扣押筆錄「文件範圍」狀態機。
+    var inSeizureDoc = false;        // 是否處於搜索扣押筆錄文件範圍內（首頁～扣押物品目錄表）
+    var lastSeizureListPage = -99;   // 扣押物品目錄表去重（連續多頁目錄表只建一個書籤）
+    var lastPhotoTitlePage = -99;    // 照片黏貼表：連續頁（次頁／次次頁仍有標題）只建一個書籤
 
     // ── 快取與文字處理 ──
     var pageCache = {};
@@ -611,8 +654,8 @@
         if (matchNMinusOne(ct, ["行車事故鑑定委員會", "囑託機關", "肇事經過", "肇事分析"])) return {type: "行車事故鑑定委員會鑑定意見書", base: "行車事故鑑定委員會鑑定意見書"};
         if (matchNMinusOne(ct, ["駕籍詳細資料報表", "列印單位", "駕駛人基本資料"])) return {type: "駕籍詳細資料報表", base: "駕籍詳細資料報表"};
         if (matchNMinusOne(ct, ["車輛詳細資料報表", "列印單位", "車輛基本資料"])) return {type: "車輛詳細資料報表", base: "車輛詳細資料報表"};
-        if (matchNMinusOne(ct, ["搜索筆錄", "扣押筆錄", "執行時間", "執行處所"]) && !has("犯罪事實")) return {type: "搜索扣押筆錄", base: "搜索扣押筆錄"};
-        if (matchNMinusOne(ct, ["扣押物品目錄表", "品名", "單位"]) && !has("犯罪事實")) return {type: "扣押物品目錄表", base: "扣押物品目錄表"};
+        // 註：搜索扣押筆錄／扣押物品目錄表自 V11.0.3 起改由主迴圈的「文件範圍狀態機」
+        // 處理（首頁＋終頁建書籤、中間頁不建），不再於此逐頁分類。
         if (matchNMinusOne(ct, ["自願受搜索同意書", "出於自願", "同意接受"]) && !has("犯罪事實")) return {type: "自願受搜索同意書", base: "自願受搜索同意書"};
         if (matchNMinusOne(ct, ["鑑定許可書", "鑑定人", "受鑑定人"])) return {type: "鑑定許可書", base: "鑑定許可書"};
         if (matchNMinusOne(ct, ["自願受採尿同意書", "出於自願", "特立此同意書"])) return {type: "自願受採尿同意書", base: "自願受採尿同意書"};
@@ -1266,6 +1309,7 @@
     // ── V11.0.0：供述重點原文摘錄 ──
     var statementExcerptKeywords = [
         "否認", "認罪",
+        "共犯", "車手", "人頭", "機房", "犯罪所得", "分工", "提領", "報酬",
         "指示", "交代", "安排", "上手", "來源",
         "LINE", "聯絡", "連絡", "取款", "收款", "面交", "轉帳", "轉賬", "匯款",
         "詐騙",
@@ -1712,6 +1756,117 @@
         }
     };
 
+    // ── V11.0.3：搜索扣押筆錄「文件範圍」辨識工具 ──
+    // 終頁：扣押物品目錄表。必須具「表格欄位」特徵，避免命中筆錄結果頁的指涉句
+    // 「詳如扣押物品目錄表（如附件）」（該句無品名／數量／單位等欄位）。
+    // 通用「標題頁首比例」工具：回傳指定關鍵字（任一）在頁面的上方比例（0=最頂、1=最底）；
+    // 取不到（無座標 API／旋轉頁／找不到關鍵字）回傳 -1。
+    // 重要：以「去空白後」的字串比對，因不少表單標題每字之間夾有空白
+    //（如「照 片 黏 貼 表」），不去空白會比對不到。
+    var keywordTopRatio = function(p, keywords) {
+        if (typeof doc.getPageNthWordQuads !== "function" || typeof doc.getPageBox !== "function") return -1;
+        var box, n;
+        try { box = doc.getPageBox("Crop", p); n = doc.getPageNumWords(p); } catch (e) { return -1; }
+        if (!box) return -1;
+        var top = box[1], bottom = box[3], h = top - bottom;
+        if (!(h > 0)) return -1;
+        if (typeof doc.getPageRotation === "function") {
+            try { if (doc.getPageRotation(p) % 360 !== 0) return -1; } catch (e2) {}  // 旋轉頁走退路
+        }
+        var concat = "", idxMap = [];
+        for (var w = 0; w < n; w++) {
+            var s = doc.getPageNthWord(p, w, false); if (s == null) s = "";
+            for (var c = 0; c < s.length; c++) {
+                var ch = s.charAt(c);
+                if (ch === " " || ch === "　" || ch === "\t" || ch === "\n" || ch === "\r") continue;
+                concat += ch; idxMap.push(w);
+            }
+        }
+        var pos = -1;
+        for (var ki = 0; ki < keywords.length; ki++) {
+            pos = concat.indexOf(keywords[ki]);
+            if (pos !== -1) break;
+        }
+        if (pos === -1) return -1;
+        var q;
+        try { q = doc.getPageNthWordQuads(p, idxMap[pos]); } catch (e3) { return -1; }
+        if (!q || !q.length) return -1;
+        var qy = (q[0] && q[0].length) ? Math.max(q[0][1], q[0][3], q[0][5], q[0][7])
+                                       : Math.max(q[1], q[3], q[5], q[7]);
+        return (top - qy) / h;
+    };
+
+    // 照片黏貼表（如「○○分局偵查隊照片黏貼表」）：標題印在頁首（實測 topRatio≈0.05）。
+    var PHOTO_PASTE_TITLE_TOP_MAX = 0.20;
+    // 連續頁容忍視窗（頁距）。實測同一份內標題隔頁出現（間隔2），但中間可能夾「純浮水印
+    // 影像頁」或「標題 OCR 斷字（如『照片黏貼』缺『表』）」而漏判，使偵測到的標題頁間距達 4，
+    // 故放寬為 4，方能跨過一張漏判頁；不同份相距甚遠（實測 ≥22），不致誤併。
+    var PHOTO_PASTE_CONT_GAP = 4;
+    var isPhotoPastePage = function(ct, p) {
+        var r = keywordTopRatio(p, ["照片黏貼表"]);
+        if (r >= 0 && r <= PHOTO_PASTE_TITLE_TOP_MAX) return true;
+        // 無座標 API（如離線模擬）時退回純關鍵字；「照片黏貼表」非「照片黏貼紀錄表」子字串，不會相撞。
+        if (typeof doc.getPageNthWordQuads !== "function") return ct.indexOf("照片黏貼表") !== -1;
+        return false;
+    };
+
+    // 扣押物品目錄表終頁：標題在頁首（實測 topRatio≈0.10）；筆錄結果頁的指涉句在內文中後段。
+    var SEIZURE_TITLE_TOP_MAX = 0.30;
+    var isSeizureListPage = function(ct, p) {
+        var r = keywordTopRatio(p, ["扣押物品目錄", "目錄表"]);
+        // 1) 位置優先：標題在頁面上方 → 真目錄表（可救欄位 OCR 斷字，如實測 P175/P261）。
+        if (r >= 0 && r <= SEIZURE_TITLE_TOP_MAX) return true;
+
+        var hasListTitle = ct.indexOf("扣押物品目錄") !== -1 ||
+                           (ct.indexOf("目錄表") !== -1 && ct.indexOf("扣押") !== -1);
+        if (!hasListTitle) return false;
+        // 指涉句排除：標題不在上方、又含「如附件／詳如」→ 視為筆錄結果頁內文指涉，非終頁。
+        if (r > SEIZURE_TITLE_TOP_MAX && (ct.indexOf("如附件") !== -1 || ct.indexOf("詳如") !== -1)) return false;
+        // 2) 退路：標題 + 至少 2 個表格欄位（位置 API 不可用或標題被浮水印打散時）。
+        var cols = ["品名", "數量", "單位", "編號", "持有人", "廠牌", "型號", "備考", "所有人"];
+        var hit = 0;
+        for (var i = 0; i < cols.length; i++) {
+            if (ct.indexOf(cols[i]) !== -1) hit++;
+            if (hit >= 2) return true;
+        }
+        return false;
+    };
+    // 首頁：搜索扣押筆錄。除標題外，要求「首頁專屬表頭欄位」，避免把筆錄續頁／簽名頁
+    // （內文有受搜索人、受扣押人等字樣）誤判為另一份新筆錄首頁。
+    var isSeizureStartPage = function(ct) {
+        if (ct.indexOf("犯罪事實") !== -1) return false;
+        var hasTitle = (ct.indexOf("搜索扣押筆錄") !== -1) ||
+                       (ct.indexOf("搜索") !== -1 && ct.indexOf("扣押") !== -1 && ct.indexOf("筆錄") !== -1) ||
+                       (ct.indexOf("搜索筆錄") !== -1) || (ct.indexOf("扣押筆錄") !== -1);
+        if (!hasTitle) return false;
+        // 首頁表頭：執行時間＋執行處所（最穩，續頁／簽名頁沒有），或出示搜索票＋受搜索/受扣押人。
+        var strongHeader = ct.indexOf("執行時間") !== -1 && ct.indexOf("執行處所") !== -1;
+        var altHeader = ct.indexOf("出示搜索票") !== -1 &&
+                        (ct.indexOf("受搜索人") !== -1 || ct.indexOf("受扣押人") !== -1);
+        return strongHeader || altHeader;
+    };
+    // 機關名（書籤前綴）：以「最不易斷的尾段」做正名對照；失敗則頁首抓警察局／分局等。
+    var seizureAgencyMap = [
+        ["刑事警察局", "內政部警政署刑事警察局"],
+        ["航空警察局", "內政部警政署航空警察局"],
+        ["鐵路警察局", "內政部警政署鐵路警察局"],
+        ["國道公路警察局", "內政部警政署國道公路警察局"],
+        ["保安警察", "內政部警政署保安警察總隊"],
+        ["港務警察", "內政部警政署港務警察總隊"],
+        ["調查局", "法務部調查局"],
+        ["憲兵", "國防部憲兵指揮部"],
+        ["海巡", "海洋委員會海巡署"]
+    ];
+    var extractSeizureAgency = function(ct) {
+        for (var i = 0; i < seizureAgencyMap.length; i++) {
+            if (ct.indexOf(seizureAgencyMap[i][0]) !== -1) return seizureAgencyMap[i][1];
+        }
+        var head = ct.substring(0, 140);
+        var m = head.match(/[\u4e00-\u9fa5]{2,10}(?:警察局|分局|警察大隊|憲兵隊|調查處|調查站|海巡隊)/);
+        if (m) return m[0];
+        return "";
+    };
+
     // ── 主執行迴圈 ──
     if (doScan) {
         // 沙盒 console 不支援同列覆寫，故每次更新都是新增一行。
@@ -1774,6 +1929,9 @@
             }
 
             if (cls) {
+                // V11.0.3：出現供述筆錄頁，代表已離開搜索扣押文件範圍，關閉狀態。
+                inSeizureDoc = false;
+
                 var isWitness   = cls.witness;
                 var isDetention = cls.detention;
                 var recordType  = cls.type;
@@ -1829,6 +1987,51 @@
                 });
 
             } else {
+                // ── V11.0.3：照片黏貼表（標題在頁首）。次頁／次次頁仍見標題視為連續頁，只建一次書籤。──
+                if (isPhotoPastePage(ct, p)) {
+                    if (lastPhotoTitlePage >= 0 && p <= lastPhotoTitlePage + PHOTO_PASTE_CONT_GAP) {
+                        lastPhotoTitlePage = p;   // 連續頁（中間可夾空白頁）→ 滑動視窗、不重複建
+                        reportScanProgress(p);
+                        continue;
+                    }
+                    docList.push({title: getBookmarkTitle("照片黏貼表"), page: p});
+                    lastPhotoTitlePage = p;
+                    inSeizureDoc = false;
+                    reportScanProgress(p);
+                    continue;
+                }
+
+                // ── V11.0.3：搜索扣押筆錄「文件範圍」狀態機（先於一般非供述分類） ──
+                // 終頁（扣押物品目錄表）優先判斷，避免與首頁特徵互搶。
+                if (isSeizureListPage(ct, p)) {
+                    // 連續多頁目錄表只建一個書籤。
+                    if (lastSeizureListPage >= 0 && p <= lastSeizureListPage + 3) {
+                        lastSeizureListPage = p;
+                        inSeizureDoc = false;
+                        reportScanProgress(p);
+                        continue;
+                    }
+                    docList.push({title: getBookmarkTitle("扣押物品目錄表"), page: p});
+                    lastSeizureListPage = p;
+                    inSeizureDoc = false;   // 終頁 → 關閉文件範圍
+                    reportScanProgress(p);
+                    continue;
+                }
+                // 首頁（搜索扣押筆錄）。
+                if (isSeizureStartPage(ct)) {
+                    var agency = extractSeizureAgency(ct);
+                    docList.push({title: getBookmarkTitle((agency ? agency : "") + "搜索扣押筆錄"), page: p});
+                    inSeizureDoc = true;
+                    lastSeizureListPage = -99;
+                    reportScanProgress(p);
+                    continue;
+                }
+                // 文件範圍內的中間頁（同意書、收據等）→ 不另建書籤。
+                if (inSeizureDoc) {
+                    reportScanProgress(p);
+                    continue;
+                }
+
                 var docResult = classifyDoc(ct);
                 if (docResult) {
                     if (docResult.type === "SKIP") {
@@ -1882,6 +2085,9 @@
         statementList = dedupResult.list;
         var dupNames = dedupResult.dupNames;
         var suppressedStatementDupCount = dedupResult.suppressedCount || 0;
+
+        // V11.0.3：非供述書籤「同名才編號」（依頁序），使搜索扣押筆錄N 與 扣押物品目錄表N 配對。
+        docList = renumberDocList(docList);
 
         var totalFound = statementList.length + docList.length;
 
