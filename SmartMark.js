@@ -1,8 +1,27 @@
 // ==========================================================================
 // SmartMark Pro 刑案電子卷證：書籤草稿自動建立腳本
-// 版本：V11.0.3（正式版）
+// 版本：V11.0.4（正式版）
 // 功能：掃描刑案電子卷證 PDF，自動建立「供述證據／非供述證據」書籤，並擷取
 //       供述筆錄中命中關鍵字的問答原文摘要，以可複製對話框呈現。
+//
+// V11.0.4 相較 V11.0.3 之改良：
+//   ★【修正證人姓名多取「男／民」】舊版替偵訊筆錄的證人取名時，會把姓名後面的
+//      性別字「男／女」一起當成名字（例：黃瑞凱→黃瑞凱男、吳慶濱→吳慶濱男）；若該
+//      證人資料沒有「歲」這個欄位、直接接「民國…年生」，還會多吃到「民國」的「民」
+//      （例：蕭勝寶→蕭勝寶男民）。實測「曾朝慶貪污案」第 135、169、219、225、267 頁
+//      皆有此問題。改法：證人取名改走與其他角色相同的通用取名程式，會自動依後面的
+//      年籍欄位（歲／民國／出生…）把性別字及其後雜字切掉，回到正確姓名。
+//   ★【修正「扣押物品目錄表」誤判】舊版只要頁面上方出現「扣押物品目錄表」這幾個
+//      字，就會建立書籤。但筆錄問答、注意事項、職務報告等內文也常「順口提到」這個
+//      表名（例如：「製作扣押物品目錄表」「扣押物品目錄表、扣押收據都是某某寫的」），
+//      這些字一樣印在頁面上方，於是被誤認成真的目錄表。實測「曾朝慶貪污案」第 13、
+//      184、192、201 頁就是這樣被誤建書籤。
+//      改法：改用「這頁是不是真的有表格」來判斷——必須同時出現「品名」，且「品名／
+//      數量／單位／編號／持有人／廠牌／型號／備考／所有人」這些欄位名至少湊到 3 個，
+//      才認定是真正的扣押物品目錄表。如此可分辨「整頁是表格」與「內文只是提到表名」。
+//      實測結果：四個誤判頁全部不再建立書籤，真正的目錄表頁（第 43、87 頁）仍正常建立。
+//      備註：萬一某份真目錄表的「品名」二字被掃描辨識斷開，這頁可能會漏建；但實務上
+//      「提到表名而誤判」遠比「品名斷字」常見，故以「寧可精準」為原則。
 //
 // V11.0.3 相較 V11.0.2 之改良：
 //   ★【搜索扣押筆錄．文件範圍化】把「搜索扣押筆錄」視為一份跨頁文件：以搜索扣押
@@ -876,6 +895,18 @@
     var cleanSubjectName = function(cand, rest) {
         cand = trimName(cand).replace(/[：:，,。．、\s　]+$/g, "");
         rest = rest || "";
+
+        // V11.0.4：過度擷取修正。取名規則貪婪取到 5 字時，可能把「性別字＋下一字」一起
+        // 吃進來（如「蕭勝寶男民」＝姓名＋男＋民國之「民」，因該人無「歲」欄而未被攔下）。
+        // 若性別字「男／女」不在結尾、且其後緊接歲／民國／出生／數字等年籍欄位，
+        // 視性別字為姓名邊界，截到性別字之前。
+        var gpos = cand.search(/[男女]/);
+        if (gpos >= 2 && gpos < cand.length - 1) {
+            var afterG = cand.substring(gpos + 1) + rest;
+            if (/^(?:\d|[一二三四五六七八九十百零〇]+歲|歲|民國|國民|出生|生|籍)/.test(afterG)) {
+                cand = cand.substring(0, gpos);
+            }
+        }
 
         if (cand.length >= 4 && /受別$/.test(cand) && (reNicknameLabel.test(rest.substring(0, 4)) || /^號|^性別/.test(rest))) {
             cand = cand.substring(0, cand.length - 2);
@@ -1811,25 +1842,35 @@
     };
 
     // 扣押物品目錄表終頁：標題在頁首（實測 topRatio≈0.10）；筆錄結果頁的指涉句在內文中後段。
-    var SEIZURE_TITLE_TOP_MAX = 0.30;
+    var SEIZURE_TITLE_TOP_MAX = 0.25;
+    // 表頭欄位詞。真目錄表為表格，表頭同時印有多個欄位名；筆錄問答／注意事項／職務報告
+    // 雖會「提及」扣押物品目錄表，但只零星出現 1～2 個欄位詞、且多半缺「品名」。
+    var SEIZURE_COLS = ["品名", "數量", "單位", "編號", "持有人", "廠牌", "型號", "備考", "所有人"];
+    var seizureColScore = function(ct) {
+        var hit = 0;
+        for (var i = 0; i < SEIZURE_COLS.length; i++) {
+            if (ct.indexOf(SEIZURE_COLS[i]) !== -1) hit++;
+        }
+        return hit;
+    };
+    // V11.0.4 修正命中錯誤（實測曾朝慶貪污案 P13/P184/P192/P201 被誤判為扣押物品目錄表）：
+    //   原因——原「位置型」分支單獨成立即回 true（topRatio≤0.30）。但內文敘述同樣自頁首
+    //   排版，筆錄問答／搜索扣押注意事項／職務報告只要在前段「提到」扣押物品目錄表，
+    //   其 topRatio 亦≤0.30 而誤判；垂直位置無法區分「標題」與「內文提及」。
+    //   修正——改以「表格結構」為必要條件：須含「品名」且至少 3 個欄位詞，方能與內文指涉
+    //   區別（實測真目錄表 P43/P87 欄位 5～7 個且含品名；四個誤判頁欄位不足或缺品名）。
+    //   位置（keywordTopRatio）僅保留作「如附件／詳如」指涉句的排除依據。
+    //   權衡——若真目錄表之「品名」OCR 斷字，本版會漏建；惟誤判遠多於斷字，故以精準為先。
     var isSeizureListPage = function(ct, p) {
-        var r = keywordTopRatio(p, ["扣押物品目錄", "目錄表"]);
-        // 1) 位置優先：標題在頁面上方 → 真目錄表（可救欄位 OCR 斷字，如實測 P175/P261）。
-        if (r >= 0 && r <= SEIZURE_TITLE_TOP_MAX) return true;
-
         var hasListTitle = ct.indexOf("扣押物品目錄") !== -1 ||
                            (ct.indexOf("目錄表") !== -1 && ct.indexOf("扣押") !== -1);
         if (!hasListTitle) return false;
-        // 指涉句排除：標題不在上方、又含「如附件／詳如」→ 視為筆錄結果頁內文指涉，非終頁。
+        // 表格結構（必要條件）：含「品名」＋至少 3 個欄位詞，否則視為內文指涉，非終頁。
+        if (!(ct.indexOf("品名") !== -1 && seizureColScore(ct) >= 3)) return false;
+        // 指涉句排除：標題不在頁首、又含「如附件／詳如」→ 視為筆錄結果頁內文指涉。
+        var r = keywordTopRatio(p, ["扣押物品目錄", "目錄表"]);
         if (r > SEIZURE_TITLE_TOP_MAX && (ct.indexOf("如附件") !== -1 || ct.indexOf("詳如") !== -1)) return false;
-        // 2) 退路：標題 + 至少 2 個表格欄位（位置 API 不可用或標題被浮水印打散時）。
-        var cols = ["品名", "數量", "單位", "編號", "持有人", "廠牌", "型號", "備考", "所有人"];
-        var hit = 0;
-        for (var i = 0; i < cols.length; i++) {
-            if (ct.indexOf(cols[i]) !== -1) hit++;
-            if (hit >= 2) return true;
-        }
-        return false;
+        return true;
     };
     // 首頁：搜索扣押筆錄。除標題外，要求「首頁專屬表頭欄位」，避免把筆錄續頁／簽名頁
     // （內文有受搜索人、受扣押人等字樣）誤判為另一份新筆錄首頁。
@@ -1949,18 +1990,15 @@
                     while (true) {
                         var wi = ct.indexOf("證人答", sf);
                         if (wi === -1) break;
-                        var aw = ct.substring(wi + 3);
-                        if (aw.length > 0 && (aw.charAt(0) === ":" || aw.charAt(0) === "：")) aw = aw.substring(1);
-                        var nw = reChName.exec(aw);
-                        if (nw) {
-                            var cw = trimName(nw[0]);
-                            if (!reWitNotName.test(cw) && !isInvalidNameCandidate(cw)) {
-                                var dup = false;
-                                for (var di = 0; di < wNames.length; di++) {
-                                    if (wNames[di] === cw) { dup = true; break; }
-                                }
-                                if (!dup) wNames.push(cw);
+                        // V11.0.4：改用通用取名器（含 cleanSubjectName），避免直接用 reChName
+                        // 貪婪取字而把性別字「男／女」（甚至「民國」之「民」）一併納入姓名。
+                        var cw = extractCandidateNameAfter(ct.substring(wi + 3));
+                        if (cw && !reWitNotName.test(cw) && !isInvalidNameCandidate(cw)) {
+                            var dup = false;
+                            for (var di = 0; di < wNames.length; di++) {
+                                if (wNames[di] === cw) { dup = true; break; }
                             }
+                            if (!dup) wNames.push(cw);
                         }
                         sf = wi + 3;
                     }
